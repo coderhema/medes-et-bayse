@@ -4,19 +4,60 @@ Uses Poke API as the backend orchestration layer.
 Strategies: Kelly Criterion, Arbitrage Detection, Market Making.
 """
 
+from __future__ import annotations
+
 import argparse
-import time
-from loguru import logger
-from dotenv import load_dotenv
 import os
+import time
+
+from dotenv import load_dotenv
+from loguru import logger
 
 from bot.bayse_client import BayseClient
 from bot.poke_client import PokeClient
-from bot.strategies.kelly import KellyStrategy
 from bot.strategies.arbitrage import ArbitrageStrategy
+from bot.strategies.kelly import KellyStrategy
 from bot.strategies.market_maker import MarketMakerStrategy
 
+try:
+    from bot.telegram_handler import build_telegram_handler_from_env
+except Exception as exc:  # pragma: no cover - optional dependency fallback
+    build_telegram_handler_from_env = None
+    logger.warning(f"Telegram handler unavailable: {exc}")
+
 load_dotenv()
+
+
+def _env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return default
+
+
+def _resolve_trade_args(signal: dict) -> tuple[str, str, float]:
+    side = str(signal.get("side", "")).lower()
+    market_id = str(
+        signal.get("market_id")
+        or signal.get("marketId")
+        or signal.get("event_id")
+        or signal.get("eventId")
+        or ""
+    ).strip()
+    outcome_id = str(signal.get("outcome_id") or signal.get("outcomeId") or side).strip()
+
+    if side == "yes":
+        price = signal.get("yes_price") or signal.get("market_prob") or signal.get("price")
+    elif side == "no":
+        price = signal.get("no_price") or signal.get("market_prob") or signal.get("price")
+    else:
+        price = signal.get("price") or signal.get("market_prob")
+
+    if price is None:
+        price = 0.0
+
+    return market_id, outcome_id, float(price)
 
 
 def run_cycle(
@@ -24,11 +65,11 @@ def run_cycle(
     poke: PokeClient,
     strategies: list,
     dry_run: bool = True,
+    bayse_user_id: str = "",
 ) -> None:
     """Execute one full scan-and-trade cycle."""
     logger.info("Starting trading cycle...")
 
-    # 1. Fetch open prediction market events
     events = client.get_open_events(page=1, size=50)
     logger.info(f"Fetched {len(events)} open markets")
 
@@ -42,7 +83,11 @@ def run_cycle(
 
     if not all_signals:
         logger.info("No actionable signals this cycle.")
-        poke.notify("medes-et-bayse: No signals this cycle.", level="info")
+        poke.notify(
+            "medes-et-bayse: No signals this cycle.",
+            payload={"user_id": bayse_user_id, "signals": []},
+            level="info",
+        )
         return
 
     executed = []
@@ -54,10 +99,22 @@ def run_cycle(
             f"Stake: ${signal['stake']:.2f} USDC"
         )
         if not dry_run:
-            result = client.place_trade(
-                event_id=signal["event_id"],
-                side=signal["side"],
-                amount=signal["stake"],
+            market_id, outcome_id, price = _resolve_trade_args(signal)
+            if not market_id or not outcome_id:
+                logger.warning(
+                    f"Skipping live trade for {signal.get('event_title', 'unknown event')} because market/outcome identifiers are missing."
+                )
+                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing market_id/outcome_id"}})
+                continue
+
+            result = client.place_order(
+                event_id=str(signal["event_id"]),
+                market_id=market_id,
+                outcome_id=outcome_id,
+                side=str(signal["side"]).upper(),
+                price=price,
+                amount=float(signal["stake"]),
+                currency=_env("BAYSE_CURRENCY", default="USDC"),
             )
             signal["trade_result"] = result
             executed.append(signal)
@@ -65,10 +122,9 @@ def run_cycle(
             logger.info("[DRY RUN] Trade not placed.")
             executed.append({**signal, "dry_run": True})
 
-    # Notify Poke with results
     poke.notify(
         f"medes-et-bayse: Cycle complete. {len(executed)} trade(s) {'simulated' if dry_run else 'executed'}.",
-        payload=executed,
+        payload={"user_id": bayse_user_id, "trades": executed},
         level="success",
     )
     logger.info("Cycle complete.")
@@ -101,13 +157,29 @@ def main():
     if args.scan_only:
         dry_run = True
 
+    bayse_public_key = _env("BAYSE_API_KEY", "BAYSE_PUBLIC_KEY")
+    bayse_secret_key = _env("BAYSE_API_SECRET", "BAYSE_SECRET_KEY")
+    bayse_base_url = _env("BAYSE_BASE_URL", default="https://relay.bayse.markets")
+    bayse_user_id = _env("BAYSE_USER_ID")
+
+    if not bayse_public_key:
+        logger.warning("BAYSE_API_KEY/BAYSE_PUBLIC_KEY is not set.")
+    if not bayse_secret_key:
+        logger.warning("BAYSE_API_SECRET/BAYSE_SECRET_KEY is not set.")
+    if not bayse_user_id:
+        logger.warning("BAYSE_USER_ID is not set.")
+
+    telegram_handler = build_telegram_handler_from_env() if build_telegram_handler_from_env else None
+
     client = BayseClient(
-        api_key=os.getenv("BAYSE_API_KEY", ""),
-        base_url=os.getenv("BAYSE_BASE_URL", "https://relay.bayse.markets"),
+        public_key=bayse_public_key,
+        secret_key=bayse_secret_key,
+        base_url=bayse_base_url,
     )
     poke = PokeClient(
-        api_key=os.getenv("POKE_API_KEY", ""),
-        webhook_url=os.getenv("POKE_WEBHOOK_URL", ""),
+        api_key=_env("POKE_API_KEY"),
+        webhook_url=_env("POKE_WEBHOOK_URL"),
+        telegram=telegram_handler,
     )
 
     min_edge = float(os.getenv("MIN_EDGE", "0.03"))
@@ -127,12 +199,12 @@ def main():
     strategies = strategy_map[args.strategy]
 
     if args.once or args.scan_only:
-        run_cycle(client, poke, strategies, dry_run=dry_run)
+        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
     else:
         logger.info(f"Starting polling loop every {poll_interval}s...")
         while True:
             try:
-                run_cycle(client, poke, strategies, dry_run=dry_run)
+                run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
             except Exception as e:
                 logger.error(f"Cycle error: {e}")
                 poke.notify(f"medes-et-bayse ERROR: {e}", level="error")

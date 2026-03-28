@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Callable, Iterable, Optional
 
 from .client import BayseClient, BayseClientError
@@ -15,6 +16,7 @@ except Exception:  # pragma: no cover - keeps imports working in non-Telegram en
 
 DEBUG_SPAM_PHRASES = {"no signals this cycle"}
 WATCHLIST_PAGE_SIZE = 10
+GENERAL_QUANT_GUIDANCE = "quant best practice: prefer limit orders, size positions deliberately, and define an exit before entry."
 
 
 @dataclass(frozen=True)
@@ -240,6 +242,36 @@ def _should_suppress_debug_message(text: Any) -> bool:
     return any(phrase in normalized for phrase in DEBUG_SPAM_PHRASES)
 
 
+def _watch_category_from_text(text: str) -> Optional[str]:
+    normalized = _normalize_text(text).lower()
+    if not normalized.startswith("watch"):
+        return None
+    args = _split_args(text)
+    if not args:
+        return None
+    if args[0].lower() == "watch" and len(args) >= 2:
+        category = args[1].strip(".,:;!?")
+        return category or None
+    return None
+
+
+def _general_plain_text_response(text: str) -> CommandResult:
+    normalized = _normalize_text(text).lower()
+    if any(phrase in normalized for phrase in ("buy", "sell", "should i", "am i", "entry", "exit", "long", "short")):
+        return CommandResult(True, "\n".join([
+            "If you want buy/sell guidance, give me a symbol or market id.",
+            GENERAL_QUANT_GUIDANCE,
+            "I can also show a quote, watch a category, or list your portfolio.",
+        ]))
+    if normalized:
+        return CommandResult(True, "\n".join([
+            f"I read: {text}",
+            "I can help with quotes, watchlists, balances, orders, and portfolio checks.",
+            "Try: watch crypto, quote BTC, /help",
+        ]))
+    return CommandResult(True, "I can help with quotes, watchlists, balances, orders, and portfolio checks. Try /help.")
+
+
 def build_quote_command(client: BayseClient, text: str) -> CommandResult:
     args = _split_args(text)
     if not args:
@@ -311,7 +343,11 @@ def build_watchlist_command(client: BayseClient, text: str = "") -> CommandResul
         if not events:
             return CommandResult(False, "No markets or events were returned by Bayse.")
         raw = {"events": events, "payload": payload}
-        return CommandResult(True, _watchlist_text(events), raw=raw)
+        category = _watch_category_from_text(text)
+        heading = _watchlist_text(events)
+        if category:
+            heading = "\n".join([f"Watching category: {category}", heading])
+        return CommandResult(True, heading, raw=raw)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
     except Exception as exc:
@@ -461,9 +497,9 @@ def _looks_like_quote_intent(text: str) -> bool:
 
 def build_natural_language_command(client: BayseClient, text: str) -> Optional[CommandResult]:
     if not _normalize_text(text):
-        return None
+        return _general_plain_text_response(text)
     if _looks_like_watch_intent(text):
-        return build_watchlist_command(client)
+        return build_watchlist_command(client, text)
     if _looks_like_balance_intent(text):
         return build_balance_command(client)
     if _looks_like_portfolio_intent(text):
@@ -478,7 +514,7 @@ def build_natural_language_command(client: BayseClient, text: str) -> Optional[C
         if symbol:
             return build_quote_command(client, f"/quote {symbol}")
         return CommandResult(False, "Say a market id or symbol after quote, for example: quote BTC")
-    return None
+    return _general_plain_text_response(text)
 def format_quote_response(response: QuoteResponse) -> str:
     return _quote_text(response)
 
@@ -539,16 +575,20 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
         if message is None:
             return
         text = getattr(message, "text", "") or ""
+        print(json.dumps({"telegram": "incoming_text", "text": text}, ensure_ascii=False), flush=True)
         result = build_natural_language_command(client, text)
         if result is None:
-            return
+            result = _general_plain_text_response(text)
         if not result.ok:
+            print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text)
             return
         if result.raw and isinstance(result.raw, dict) and result.raw.get("events"):
             events = result.raw.get("events", [])
+            print(json.dumps({"telegram": "text_routed", "route": "watchlist", "text": text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events))
             return
+        print(json.dumps({"telegram": "text_routed", "route": "general", "text": text}, ensure_ascii=False), flush=True)
         await message.reply_text(result.text)
 
     return handler

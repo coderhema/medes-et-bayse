@@ -105,7 +105,7 @@ def _start_http_server() -> ThreadingHTTPServer:
     port = int(os.getenv("PORT", "8080"))
     server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(json.dumps({"http": "listening", "port": port}, ensure_ascii=False))
+    print(json.dumps({"http": "listening", "port": port}, ensure_ascii=False), flush=True)
     return server
 
 
@@ -115,12 +115,13 @@ def main() -> None:
         print("TELEGRAM_BOT_TOKEN is missing", file=sys.stderr)
         raise SystemExit(2)
 
-    result = set_my_commands(token)
-    print(json.dumps({"startup": "ok", "setMyCommands": result.get("ok", False), "pokeApiKeyConfigured": bool(runtime_config.poke_api_key)}, ensure_ascii=False))
-
     _start_http_server()
+
+    result = set_my_commands(token)
+    print(json.dumps({"startup": "ok", "setMyCommands": result.get("ok", False), "pokeApiKeyConfigured": bool(runtime_config.poke_api_key)}, ensure_ascii=False), flush=True)
+
     application = build_application()
-    print(json.dumps({"polling": "starting"}, ensure_ascii=False))
+    print(json.dumps({"polling": "starting"}, ensure_ascii=False), flush=True)
     application.run_polling(drop_pending_updates=True)
 
 

@@ -557,6 +557,15 @@ def _watchlist_keyboard(events: list[dict[str, Any]]) -> Any:
     return InlineKeyboardMarkup(rows) if rows else None
 
 
+def _asset_keyboard(action: str) -> Any:
+    action_key = _normalize_text(action).lower()
+    if action_key not in {"fund", "withdraw"}:
+        return None
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("NGN", callback_data=f"{action_key}:NGN"), InlineKeyboardButton("USD", callback_data=f"{action_key}:USD")]
+    ])
+
+
 def _quote_search_text(term: str, candidates: list[dict[str, Any]]) -> str:
     lines = [f"<b>Select a market for</b> {_bold(term)}"]
     for index, candidate in enumerate(candidates[:10], start=1):
@@ -880,13 +889,13 @@ def build_help_command() -> CommandResult:
         True,
         "\n".join([
             "<b>Medes Et Bayse commands</b>",
-            "/quote <code>market name or symbol</code> - Search Bayse markets and pick one interactively",
-            "/events [term] - List active markets or search by keyword",
-            "/order <code>event name</code> <code>market name</code> <code>outcome</code> <code>buy|sell</code> <code>amount</code> <code>currency</code> [price] [LIMIT|MARKET] - Place a trade order",
+            "/quote <code>market name or symbol</code> - Search Bayse markets and pick one interactively (or send /quote alone to be prompted)",
+            "/events [term] - List active markets or search by keyword (or send /events alone to be prompted)",
+            "/order <code>event name</code> <code>market name</code> <code>outcome</code> <code>buy|sell</code> <code>amount</code> <code>currency</code> [price] [LIMIT|MARKET] - Place a trade order (or send /order alone for a guided prompt)",
             "/balance - Check your wallet balance",
             "/portfolio - View open positions",
-            "/fund [NGN|USD] - Show funding options for the selected currency",
-            "/withdraw [NGN|USD] - Show withdrawal options for the selected currency",
+            "/fund [NGN|USD] - Show funding options for the selected currency (or send /fund alone for buttons)",
+            "/withdraw [NGN|USD] - Show withdrawal options for the selected currency (or send /withdraw alone for buttons)",
             "/help - Show bot usage info",
             GENERAL_QUANT_GUIDANCE.capitalize(),
         ]),
@@ -965,6 +974,74 @@ def _looks_like_quote_intent(text: str) -> bool:
     return any(keyword in normalized for keyword in ("quote", "price", "ticker"))
 
 
+def _pending_interaction_kind(context: Any) -> str:
+    pending = getattr(context, "user_data", {}).get("pending_interaction") if context is not None else None
+    if isinstance(pending, dict):
+        return _normalize_text(pending.get("kind")).lower()
+    return _normalize_text(pending).lower()
+
+
+def _set_pending_interaction(context: Any, kind: str, *, prompt: Optional[str] = None) -> None:
+    if context is None:
+        return
+    context.user_data["pending_interaction"] = {"kind": _normalize_text(kind).lower(), "prompt": prompt or ""}
+
+
+def _clear_pending_interaction(context: Any) -> None:
+    if context is None:
+        return
+    context.user_data.pop("pending_interaction", None)
+
+
+def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> Optional[CommandResult]:
+    kind = _pending_interaction_kind(context)
+    if not kind:
+        return None
+
+    text_value = _normalize_text(text)
+    if kind == "quote":
+        if not text_value:
+            return CommandResult(False, "What do you want to quote?")
+        result = build_quote_command(client, text_value)
+        if result.ok:
+            _clear_pending_interaction(context)
+        return result
+
+    if kind == "events":
+        if not text_value:
+            return CommandResult(False, "What events do you want to see?")
+        result = build_events_command(client, text_value)
+        if result.ok:
+            _clear_pending_interaction(context)
+        return result
+
+    if kind == "order":
+        if not text_value:
+            return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
+        result = build_order_command(client, text_value)
+        if result.ok:
+            _clear_pending_interaction(context)
+        return result
+
+    if kind == "fund":
+        if not text_value:
+            return CommandResult(False, "Choose NGN or USD to see funding options.")
+        result = build_fund_command(client, text_value)
+        if result.ok:
+            _clear_pending_interaction(context)
+        return result
+
+    if kind == "withdraw":
+        if not text_value:
+            return CommandResult(False, "Choose NGN or USD to see withdrawal options.")
+        result = build_withdraw_command(client, text_value)
+        if result.ok:
+            _clear_pending_interaction(context)
+        return result
+
+    return None
+
+
 def build_natural_language_command(client: BayseClient, text: str) -> CommandResult:
     if not _normalize_text(text):
         return _general_plain_text_response(text)
@@ -1039,7 +1116,11 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
             return
         text = getattr(message, "text", "") or ""
         print(json.dumps({"telegram": "incoming_text", "text": text}, ensure_ascii=False), flush=True)
-        result = build_natural_language_command(client, text)
+        pending_result = _route_pending_interaction(client, context, text)
+        if pending_result is not None:
+            result = pending_result
+        else:
+            result = build_natural_language_command(client, text)
         if not result.ok:
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text, parse_mode="HTML")
@@ -1072,6 +1153,14 @@ def fund_handler_factory(client: Optional[BayseClient] = None) -> Callable[[Any,
         if message is None:
             return
         text = getattr(message, "text", "") or ""
+        if len(_split_args(text)) == 0:
+            _set_pending_interaction(context, "fund", prompt="Choose NGN or USD to see funding options.")
+            await message.reply_text(
+                "Choose NGN or USD to see funding options.",
+                reply_markup=_asset_keyboard("fund"),
+                parse_mode="HTML",
+            )
+            return
         result = build_fund_command(client, text=text)
         await message.reply_text(result.text, parse_mode="HTML")
 
@@ -1084,6 +1173,14 @@ def withdraw_handler_factory(client: Optional[BayseClient] = None) -> Callable[[
         if message is None:
             return
         text = getattr(message, "text", "") or ""
+        if len(_split_args(text)) == 0:
+            _set_pending_interaction(context, "withdraw", prompt="Choose NGN or USD to see withdrawal options.")
+            await message.reply_text(
+                "Choose NGN or USD to see withdrawal options.",
+                reply_markup=_asset_keyboard("withdraw"),
+                parse_mode="HTML",
+            )
+            return
         result = build_withdraw_command(client, text=text)
         await message.reply_text(result.text, parse_mode="HTML")
 
@@ -1096,6 +1193,10 @@ def quote_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         if message is None:
             return
         text = getattr(message, "text", "") or ""
+        if len(_split_args(text)) == 0:
+            _set_pending_interaction(context, "quote", prompt="What do you want to quote?")
+            await message.reply_text("What do you want to quote?", parse_mode="HTML")
+            return
         result = build_quote_command(client, text)
         if _should_suppress_debug_message(result.text):
             return
@@ -1116,6 +1217,13 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         if message is None:
             return
         text = getattr(message, "text", "") or ""
+        if len(_split_args(text)) < 6:
+            _set_pending_interaction(context, "order", prompt="What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
+            await message.reply_text(
+                "What order do you want to place? Send the event, market, outcome, side, amount, and currency.",
+                parse_mode="HTML",
+            )
+            return
         result = build_order_command(client, text)
         if _should_suppress_debug_message(result.text):
             return
@@ -1150,6 +1258,13 @@ def events_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         if message is None:
             return
         text = getattr(message, "text", "") or ""
+        if len(_split_args(text)) == 0:
+            _set_pending_interaction(context, "events", prompt="What events do you want to see?")
+            await message.reply_text(
+                "What events do you want to see? Send a keyword, category, or say show events.",
+                parse_mode="HTML",
+            )
+            return
         result = build_events_command(client, text=text)
         if not result.ok:
             await message.reply_text(result.text, parse_mode="HTML")
@@ -1167,7 +1282,7 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             return
 
         data = str(query.data)
-        if not (data.startswith("watch:") or data.startswith("quote:")):
+        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:")):
             return
 
         await query.answer()
@@ -1226,6 +1341,14 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
                 return
             events = result.raw.get("events", []) if result.raw else []
             await query.edit_message_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
+            return
+
+        if prefix in {"fund", "withdraw"}:
+            asset = selected.upper()
+            result = build_fund_command(client, asset) if prefix == "fund" else build_withdraw_command(client, asset)
+            if result.ok:
+                _clear_pending_interaction(context)
+            await query.edit_message_text(result.text, parse_mode="HTML")
             return
 
         try:

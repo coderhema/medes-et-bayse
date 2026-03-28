@@ -1,0 +1,266 @@
+from __future__ import annotations
+
+import dataclasses
+import json
+from typing import Any, Dict, Mapping, Optional
+from urllib import error, parse, request
+
+from .auth import BayseAuth
+from .models import BayseError, Order, OrderResponse, Quote, QuoteResponse
+
+
+class BayseClientError(RuntimeError):
+    def __init__(self, message: str, *, status_code: Optional[int] = None, error: Optional[BayseError] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error = error
+
+
+@dataclasses.dataclass
+class BayseClient:
+    api_key: str
+    api_secret: str
+    base_url: str = "https://relay.bayse.markets"
+    api_version: str = "v1"
+    timeout: float = 30.0
+    signature_encoding: str = "base64"
+    api_key_header: str = "X-Public-Key"
+    timestamp_header: str = "X-Timestamp"
+    signature_header: str = "X-Signature"
+
+    def __post_init__(self) -> None:
+        self._auth = BayseAuth(
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+            api_key_header=self.api_key_header,
+            timestamp_header=self.timestamp_header,
+            signature_header=self.signature_header,
+            signature_encoding=self.signature_encoding,
+        )
+
+    def _normalize_path(self, path: str) -> str:
+        return path if path.startswith("/") else f"/{path}"
+
+    def _versioned_path(self, path: str) -> str:
+        normalized = self._normalize_path(path)
+        prefix = f"/{self.api_version}"
+        if normalized.startswith(prefix):
+            return normalized
+        return f"{prefix}{normalized}"
+
+    def _build_url(self, path: str, params: Optional[Mapping[str, Any]] = None) -> str:
+        full_path = self._versioned_path(path)
+        url = f"{self.base_url.rstrip('/')}{full_path}"
+        if params:
+            query = parse.urlencode({k: v for k, v in params.items() if v is not None})
+            url = f"{url}?{query}"
+        return url
+
+    def _parse_response(self, payload: str) -> Dict[str, Any]:
+        if not payload:
+            return {}
+        return json.loads(payload)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Mapping[str, Any]] = None,
+        json_body: Optional[Mapping[str, Any]] = None,
+        extra_headers: Optional[Mapping[str, str]] = None,
+        auth: str = "none",
+    ) -> Dict[str, Any]:
+        body_bytes = None
+        body_for_signing: Any = None
+        headers: Dict[str, str] = {"Accept": "application/json"}
+
+        if json_body is not None:
+            body_for_signing = json_body
+            body_bytes = json.dumps(json_body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        versioned_path = self._versioned_path(path)
+
+        if auth == "read":
+            headers[self.api_key_header] = self.api_key
+        elif auth == "write":
+            headers.update(self._auth.sign(method=method, path=versioned_path, body=body_for_signing))
+        elif auth == "session":
+            raise ValueError("session auth requires explicit session headers")
+
+        if extra_headers:
+            headers.update(extra_headers)
+
+        req = request.Request(
+            self._build_url(path, params=params),
+            data=body_bytes,
+            headers=headers,
+            method=method.upper(),
+        )
+
+        try:
+            with request.urlopen(req, timeout=self.timeout) as resp:
+                payload = resp.read().decode("utf-8")
+                return self._parse_response(payload)
+        except error.HTTPError as exc:
+            raw = exc.read().decode("utf-8") if exc.fp else ""
+            parsed_error: Optional[BayseError] = None
+            if raw:
+                try:
+                    parsed_error = BayseError.from_dict(json.loads(raw))
+                except Exception:
+                    parsed_error = BayseError(code=str(exc.code), message=raw or exc.reason, raw={"status": exc.code})
+            raise BayseClientError(
+                parsed_error.message if parsed_error else exc.reason,
+                status_code=exc.code,
+                error=parsed_error,
+            ) from exc
+        except error.URLError as exc:
+            raise BayseClientError(str(exc.reason)) from exc
+
+    def _session_headers(self, token: str, device_id: str) -> Dict[str, str]:
+        return {
+            "x-auth-token": token,
+            "x-device-id": device_id,
+        }
+
+    # Public and read endpoints
+    def health(self) -> Dict[str, Any]:
+        return self._request("GET", "/health")
+
+    def version(self) -> Dict[str, Any]:
+        return self._request("GET", "/version")
+
+    def list_events(self, *, page: int = 1, size: int = 20, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {"page": page, "size": size}
+        if params:
+            query.update(params)
+        return self._request("GET", "/pm/events", params=query, auth="read")
+
+    def get_event(self, event_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/pm/events/{event_id}", auth="read")
+
+    def get_portfolio(self) -> Dict[str, Any]:
+        return self._request("GET", "/pm/portfolio", auth="read")
+
+    def list_orders(self, *, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("GET", "/pm/orders", params=params, auth="read")
+
+    def get_order(self, order_id: str) -> OrderResponse:
+        payload = self._request("GET", f"/pm/orders/{order_id}", auth="read")
+        return OrderResponse.from_dict(payload)
+
+    def get_ticker(self, market_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/pm/markets/{market_id}/ticker", auth="read")
+
+    def get_orderbook(self, *, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("GET", "/pm/books", params=params, auth="read")
+
+    def get_trades(self, *, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        return self._request("GET", "/pm/trades", params=params, auth="read")
+
+    # Login and API-key management
+    def login(self, email: str, password: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/user/login",
+            json_body={"email": email, "password": password},
+        )
+
+    def create_api_key(self, token: str, device_id: str, name: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/user/me/api-keys",
+            json_body={"name": name},
+            extra_headers=self._session_headers(token, device_id),
+        )
+
+    def list_api_keys(self, token: str, device_id: str) -> Dict[str, Any]:
+        return self._request(
+            "GET",
+            "/user/me/api-keys",
+            extra_headers=self._session_headers(token, device_id),
+        )
+
+    def revoke_api_key(self, token: str, device_id: str, key_id: str) -> Dict[str, Any]:
+        return self._request(
+            "DELETE",
+            f"/user/me/api-keys/{key_id}",
+            extra_headers=self._session_headers(token, device_id),
+        )
+
+    def rotate_api_key(self, token: str, device_id: str, key_id: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/user/me/api-keys/{key_id}/rotate",
+            extra_headers=self._session_headers(token, device_id),
+        )
+
+    # Trading endpoints
+    def get_quote(self, symbol: str) -> QuoteResponse:
+        payload = self.get_ticker(symbol)
+        return QuoteResponse.from_dict(payload)
+
+    def get_market_quote(self, event_id: str, market_id: str, quote: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/pm/events/{event_id}/markets/{market_id}/quote",
+            json_body=dict(quote) if quote is not None else None,
+            auth="write",
+        )
+
+    def place_order(
+        self,
+        event_id: str,
+        market_id: str,
+        *,
+        outcome: str,
+        side: str,
+        amount: float,
+        currency: str,
+        order_type: str = "LIMIT",
+        price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "outcome": outcome,
+            "side": side,
+            "amount": amount,
+            "currency": currency,
+            "type": order_type,
+        }
+        if price is not None:
+            body["price"] = price
+        return self._request(
+            "POST",
+            f"/pm/events/{event_id}/markets/{market_id}/orders",
+            json_body=body,
+            auth="write",
+        )
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        return self._request("DELETE", f"/pm/orders/{order_id}", auth="write")
+
+    def mint_shares(self, market_id: str, amount: float) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/pm/markets/{market_id}/mint",
+            json_body={"amount": amount},
+            auth="write",
+        )
+
+    def burn_shares(self, market_id: str, amount: float) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/pm/markets/{market_id}/burn",
+            json_body={"amount": amount},
+            auth="write",
+        )
+
+    # Compatibility helpers retained for existing integrations
+    def quote(self, symbol: str) -> Quote:
+        payload = self.get_ticker(symbol)
+        return Quote.from_dict(payload)
+
+    def order(self, order_id: str) -> Order:
+        return self.get_order(order_id).order

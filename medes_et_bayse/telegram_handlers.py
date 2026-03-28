@@ -511,6 +511,14 @@ def build_help_command() -> CommandResult:
     )
 
 
+def format_quote_response(response: QuoteResponse) -> str:
+    return _quote_text(response)
+
+
+def format_order_response(response: OrderResponse) -> str:
+    return _order_text(response)
+
+
 def format_signal_message(direction: Any, title: str, details: Optional[str] = None) -> str:
     emoji = _signal_emoji(direction)
     header = f"{emoji} {title}" if emoji else title

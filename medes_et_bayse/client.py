@@ -50,7 +50,7 @@ class BayseClient:
 
     def _build_url(self, path: str, params: Optional[Mapping[str, Any]] = None) -> str:
         full_path = self._versioned_path(path)
-        url = f"{self.base_url.rstrip('/')}{full_path}"
+        url = f"{self.base_url.rstrip('/')}" + full_path
         if params:
             query = parse.urlencode({k: v for k, v in params.items() if v is not None})
             url = f"{url}?{query}"
@@ -138,11 +138,23 @@ class BayseClient:
             query.update(params)
         return self._request("GET", "/pm/events", params=query, auth="read")
 
+    def search_events(self, keyword: str, *, page: int = 1, size: int = 20, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {"page": page, "size": size, "keyword": keyword}
+        if params:
+            query.update(params)
+        return self._request("GET", "/pm/events", params=query, auth="read")
+
     def get_event(self, event_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/pm/events/{event_id}", auth="read")
 
+    def get_event_by_slug(self, slug: str) -> Dict[str, Any]:
+        return self._request("GET", f"/pm/events/slug/{slug}", auth="read")
+
     def get_portfolio(self) -> Dict[str, Any]:
         return self._request("GET", "/pm/portfolio", auth="read")
+
+    def get_assets(self) -> Dict[str, Any]:
+        return self._request("GET", "/wallet/assets", auth="read")
 
     def list_orders(self, *, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         return self._request("GET", "/pm/orders", params=params, auth="read")

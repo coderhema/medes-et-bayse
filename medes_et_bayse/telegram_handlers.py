@@ -350,7 +350,7 @@ def _funding_asset_from_text(text: str) -> Optional[str]:
     if any(keyword in normalized for keyword in ("ngn", "naira", "cash", "local currency", "wallet")):
         return "NGN"
     if any(keyword in normalized for keyword in ("usd", "usdt", "crypto", "stablecoin", "be p20", "bep20", "crypto wallet")):
-        return "USDT"
+        return "USD"
     return None
 
 
@@ -359,7 +359,7 @@ def _withdraw_asset_from_text(text: str) -> Optional[str]:
     if any(keyword in normalized for keyword in ("ngn", "naira", "bank", "cash")):
         return "NGN"
     if any(keyword in normalized for keyword in ("usd", "usdt", "crypto", "wallet", "stablecoin")):
-        return "USDT"
+        return "USD"
     return None
 
 
@@ -373,14 +373,14 @@ def _fund_text(asset: Optional[str] = None) -> str:
             "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>Naira</b>, then follow the prompt to generate a unique virtual bank account.",
             "Security: the deposit account is one-time use. Use the name that matches your verified account and check transaction history if the transfer is delayed.",
         ])
-    if asset in {None, "USDT"}:
+    if asset in {None, "USD"}:
         if asset is None:
             lines.append("")
         lines.extend([
-            "<b>USDT wallet</b>",
+            "<b>USD wallet</b>",
             "Minimum deposit: <code>$1</code>",
             "Network: <code>BEP20</code> only",
-            "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>USDT</b>, then copy the wallet address or use the QR code.",
+            "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>USD</b>, then copy the wallet address or use the QR code.",
             "Security: use the BEP20 network only. Sending on the wrong network may result in lost funds.",
         ])
     lines.append("If you want, I can show the matching withdrawal flow too.")
@@ -397,11 +397,11 @@ def _withdraw_text(asset: Optional[str] = None) -> str:
             "Flow: open <b>Wallet</b>, tap <b>Withdraw</b>, then enter your bank account details.",
             "Security: withdrawals must go to a bank account that matches your verified Bayse name. KYC is required.",
         ])
-    if asset in {None, "USDT"}:
+    if asset in {None, "USD"}:
         if asset is None:
             lines.append("")
         lines.extend([
-            "<b>USDT withdrawal</b>",
+            "<b>USD withdrawal</b>",
             "Minimum withdrawal: <code>$1</code>",
             "Flow: open <b>Wallet</b>, tap <b>Withdraw</b>, then enter your crypto wallet address.",
             "Security: confirm the address and network carefully. Network fees may apply.",
@@ -413,14 +413,14 @@ def _withdraw_text(asset: Optional[str] = None) -> str:
 def build_fund_command(text: str = "") -> CommandResult:
     asset = _funding_asset_from_text(text)
     if asset is None and _normalize_text(text):
-        return CommandResult(False, "Usage: /fund [NGN|USDT]")
+        return CommandResult(False, "Usage: /fund [NGN|USD]")
     return CommandResult(True, _fund_text(asset))
 
 
 def build_withdraw_command(text: str = "") -> CommandResult:
     asset = _withdraw_asset_from_text(text)
     if asset is None and _normalize_text(text):
-        return CommandResult(False, "Usage: /withdraw [NGN|USDT]")
+        return CommandResult(False, "Usage: /withdraw [NGN|USD]")
     return CommandResult(True, _withdraw_text(asset))
 
 
@@ -428,10 +428,27 @@ def build_quote_command(client: BayseClient, text: str) -> CommandResult:
     args = _split_args(text)
     if not args:
         return CommandResult(False, "Usage: /quote <market name or symbol>")
-    market_id = args[0]
+    term = args[0]
     try:
-        response = QuoteResponse.from_dict(client.get_ticker(market_id))
-        return CommandResult(True, _quote_text(response), raw=response.raw)
+        response = client.search_events(term, page=1, size=WATCHLIST_PAGE_SIZE, params={"status": "open"})
+        events = _extract_collection(response)
+        candidates = []
+        for event in events:
+            markets = _extract_collection(event.get("markets") or [])
+            event_title = _event_title(event)
+            for market in markets:
+                candidates.append({
+                    "event": event,
+                    "market": market,
+                    "event_title": event_title,
+                    "market_title": _market_title(market),
+                    "yes_price": _first_string(market.get("yes_price"), market.get("yesPrice"), market.get("yes"), default="n/a"),
+                    "no_price": _first_string(market.get("no_price"), market.get("noPrice"), market.get("no"), default="n/a"),
+                })
+        if not candidates:
+            return CommandResult(False, "No matching markets were returned by Bayse.")
+        raw = {"mode": "quote", "term": term, "events": events, "quote_candidates": candidates, "payload": response}
+        return CommandResult(True, _quote_search_text(term, candidates), raw=raw)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
     except Exception as exc:
@@ -579,13 +596,13 @@ def build_help_command() -> CommandResult:
         True,
         "\n".join([
             "<b>Medes Et Bayse commands</b>",
-            "/quote <code>market name or symbol</code> - Get a market quote",
+            "/quote <code>market name or symbol</code> - Search Bayse markets and pick one interactively",
+            "/events [term] - List active markets or search by keyword",
             "/order <code>event name</code> <code>market name</code> <code>outcome</code> <code>buy|sell</code> <code>amount</code> <code>currency</code> [price] [LIMIT|MARKET] - Place a trade order",
             "/balance - Check your wallet balance",
             "/portfolio - View open positions",
-            "/fund - Show funding options for NGN and USDT",
-            "/withdraw - Show withdrawal options for NGN and USDT",
-            "/events - List active markets",
+            "/fund [NGN|USD] - Show funding options for the selected currency",
+            "/withdraw [NGN|USD] - Show withdrawal options for the selected currency",
             "/help - Show bot usage info",
             GENERAL_QUANT_GUIDANCE.capitalize(),
         ]),

@@ -162,7 +162,7 @@ class TelegramHandler:
             balance = self._fmt_money(pos.get("balance", 0))
             current_value = self._fmt_money(pos.get("currentValue", 0))
             avg_price = self._fmt_float(pos.get("averagePrice", 0))
-            lines.append(f"��� {title} [{outcome}]\n  balance: {balance}\n  avg price: {avg_price}\n  current value: {current_value}")
+            lines.append(f"• {title} [{outcome}]\n  balance: {balance}\n  avg price: {avg_price}\n  current value: {current_value}")
 
         summary = []
         if total_cost is not None:
@@ -212,14 +212,14 @@ class TelegramHandler:
     def _usage_quote(self) -> str:
         return (
             "Usage:\n"
-            "/quote event_id=<uuid> market_id=<uuid> side=BUY outcome_id=<uuid> amount=100 currency=USD\n"
+            "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD\n"
             "or positional: /quote <event_id> <market_id> <side> <outcome_id> <amount> [currency]"
         )
 
     def _usage_order(self) -> str:
         return (
             "Usage:\n"
-            "/order event_id=<uuid> market_id=<uuid> side=BUY outcome_id=<uuid> amount=100 currency=USD type=MARKET price=0.72\n"
+            "/order event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD type=MARKET price=0.72\n"
             "Optional: time_in_force=GTC post_only=false max_slippage=0.02 expires_at=2026-03-28T12:00:00Z\n"
             "or positional: /order <event_id> <market_id> <side> <outcome_id> <amount> [currency] [type] [price]"
         )
@@ -241,8 +241,8 @@ class TelegramHandler:
             "/quote — price quote before an order\n"
             "/order — place a Bayse order\n\n"
             "Examples:\n"
-            "/quote event_id=<uuid> market_id=<uuid> side=BUY outcome_id=<uuid> amount=100 currency=USD\n"
-            "/order event_id=<uuid> market_id=<uuid> side=BUY outcome_id=<uuid> amount=100 type=MARKET currency=USD",
+            "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD\n"
+            "/order event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 type=MARKET currency=USD",
             parse_mode="HTML",
         )
 

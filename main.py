@@ -10,13 +10,15 @@ from urllib import error, request
 
 from medes_et_bayse import (
     BayseClient,
+    build_balance_command,
     build_help_command,
+    build_portfolio_command,
     natural_language_handler_factory,
     order_handler_factory,
     quote_handler_factory,
+    runtime_config,
     watchlist_callback_handler_factory,
     watchlist_handler_factory,
-    runtime_config,
 )
 
 try:
@@ -55,35 +57,6 @@ def set_my_commands(token: str) -> dict[str, Any]:
         raise RuntimeError(f"Telegram API error ({exc.code}): {body}") from exc
 
 
-def build_application() -> Application:
-    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-    if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
-
-    client = BayseClient(
-        api_key=runtime_config.public_key,
-        api_secret=runtime_config.secret_key,
-        base_url=runtime_config.base_url,
-    )
-
-    application = Application.builder().token(token).build()
-    application.bot_data["poke_api_key"] = runtime_config.poke_api_key
-
-    async def help_handler(update: Any, context: Any) -> None:
-        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
-        if message is None:
-            return
-        await message.reply_text(build_help_command().text)
-
-    application.add_handler(CommandHandler("quote", quote_handler_factory(client)))
-    application.add_handler(CommandHandler("order", order_handler_factory(client)))
-    application.add_handler(CommandHandler("events", watchlist_handler_factory(client)))
-    application.add_handler(CommandHandler("help", help_handler))
-    application.add_handler(CallbackQueryHandler(watchlist_callback_handler_factory(client)))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, natural_language_handler_factory(client)))
-    return application
-
-
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path in {"/", "/health", "/healthz"}:
@@ -109,6 +82,51 @@ def _start_http_server() -> ThreadingHTTPServer:
     return server
 
 
+def build_application() -> Application:
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+
+    client = BayseClient(
+        api_key=runtime_config.public_key,
+        api_secret=runtime_config.secret_key,
+        base_url=runtime_config.base_url,
+    )
+
+    application = Application.builder().token(token).build()
+    application.bot_data["poke_api_key"] = runtime_config.poke_api_key
+
+    async def help_handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        await message.reply_text(build_help_command().text, parse_mode="HTML")
+
+    async def balance_handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        result = build_balance_command(client)
+        await message.reply_text(result.text, parse_mode="HTML")
+
+    async def portfolio_handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        result = build_portfolio_command(client)
+        await message.reply_text(result.text, parse_mode="HTML")
+
+    application.add_handler(CommandHandler("quote", quote_handler_factory(client)))
+    application.add_handler(CommandHandler("order", order_handler_factory(client)))
+    application.add_handler(CommandHandler("events", watchlist_handler_factory(client)))
+    application.add_handler(CommandHandler("balance", balance_handler))
+    application.add_handler(CommandHandler("portfolio", portfolio_handler))
+    application.add_handler(CommandHandler("help", help_handler))
+    application.add_handler(CallbackQueryHandler(watchlist_callback_handler_factory(client)))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, natural_language_handler_factory(client)))
+    return application
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not token:
@@ -116,7 +134,6 @@ def main() -> None:
         raise SystemExit(2)
 
     _start_http_server()
-
     result = set_my_commands(token)
     print(json.dumps({"startup": "ok", "setMyCommands": result.get("ok", False), "pokeApiKeyConfigured": bool(runtime_config.poke_api_key)}, ensure_ascii=False), flush=True)
 

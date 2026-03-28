@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from html import escape as html_escape
 from typing import Any, Callable, Iterable, Optional
 
 from .client import BayseClient, BayseClientError
@@ -9,7 +10,7 @@ from .models import OrderResponse, QuoteResponse
 
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-except Exception:  # pragma: no cover - keeps imports working in non-Telegram environments
+except Exception:  # pragma: no cover
     InlineKeyboardButton = Any  # type: ignore[assignment]
     InlineKeyboardMarkup = Any  # type: ignore[assignment]
 
@@ -34,13 +35,45 @@ class StickerSetConfig:
     trophy: Optional[str] = None
 
 
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _safe_html(value: Any) -> str:
+    return html_escape(_normalize_text(value))
+
+
+def _bold(value: Any) -> str:
+    return f"<b>{_safe_html(value)}</b>"
+
+
+def _code(value: Any) -> str:
+    text = _normalize_text(value)
+    return f"<code>{html_escape(text)}</code>" if text else "<code>n/a</code>"
+
+
 def _split_args(text: str) -> list[str]:
     parts = (text or "").strip().split()
     if not parts:
         return []
-    if parts[0].startswith("/"):
-        return parts[1:]
-    return parts
+    return parts[1:] if parts[0].startswith("/") else parts
+
+
+def _first_string(*values: Any, default: str = "") -> str:
+    for value in values:
+        text = _normalize_text(value)
+        if text:
+            return text
+    return default
+
+
+def _mapping_value(mapping: Any, *path: str) -> Any:
+    current = mapping
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _format_number(value: Any) -> str:
@@ -53,10 +86,6 @@ def _format_number(value: Any) -> str:
     if num.is_integer():
         return str(int(num))
     return f"{num:.8f}".rstrip("0").rstrip(".")
-
-
-def _normalize_text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def _side_emoji(side: Any) -> str:
@@ -77,97 +106,52 @@ def _signal_emoji(direction: Any) -> str:
     return ""
 
 
-def _quote_text(response: QuoteResponse) -> str:
-    quote = response.quote
-    parts = [
-        f"Quote for {quote.symbol or 'unknown'}",
-        f"bid: {_format_number(quote.bid)}",
-        f"ask: {_format_number(quote.ask)}",
-        f"last: {_format_number(quote.last)}",
-        f"mark: {_format_number(quote.mark)}",
-        f"midpoint: {_format_number(quote.midpoint)}",
-        f"timestamp: {quote.timestamp or 'n/a'}",
-    ]
-    return "\n".join(parts)
-
-
-def _order_text(response: OrderResponse) -> str:
-    order = response.order
-    raw = response.raw or {}
-    emoji = _side_emoji(order.side) or _signal_emoji(order.side)
-    heading = f"{emoji} Order {order.order_id or 'n/a'}" if emoji else f"Order {order.order_id or 'n/a'}"
-    parts = [
-        heading,
-        f"status: {order.status or 'n/a'}",
-        f"event id: {_format_number(raw.get('eventId') or raw.get('event_id'))}",
-        f"market id: {_format_number(raw.get('marketId') or raw.get('market_id'))}",
-        f"outcome: {_format_number(raw.get('outcome') or raw.get('outcomeId') or raw.get('outcome_id') or raw.get('outcomeIndex'))}",
-        f"side: {order.side or 'n/a'}",
-        f"type: {order.order_type or raw.get('type') or 'n/a'}",
-        f"amount: {_format_number(raw.get('amount') or order.quantity)}",
-        f"price: {_format_number(order.limit_price or raw.get('price'))}",
-        f"filled quantity: {_format_number(order.filled_quantity or raw.get('filled'))}",
-        f"average fill price: {_format_number(order.average_fill_price)}",
-        f"created at: {order.created_at or raw.get('createdAt') or 'n/a'}",
-        f"updated at: {order.updated_at or raw.get('updatedAt') or 'n/a'}",
-        "quant best practice: prefer limit orders, size positions deliberately, and define an exit before entry.",
-    ]
-    return "\n".join(parts)
-
-
-def _error_text(exc: BayseClientError) -> str:
-    if exc.error is not None:
-        details = []
-        if exc.error.code:
-            details.append(f"code: {exc.error.code}")
-        details.append(f"message: {exc.error.message}")
-        if exc.error.details:
-            details.append(f"details: {exc.error.details}")
-        return "Bayse API error\n" + "\n".join(details)
-    if exc.status_code is not None:
-        return f"Bayse API error\nstatus: {exc.status_code}\nmessage: {exc}"
-    return f"Bayse API error\nmessage: {exc}"
-
-
-def _extract_collection(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if not isinstance(payload, dict):
-        return []
-
-    for key in ("events", "items", "results", "data", "markets"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-        if isinstance(value, dict):
-            nested = _extract_collection(value)
-            if nested:
-                return nested
-    return []
-
-
-def _first_string(*values: Any, default: str = "") -> str:
+def _price_direction_emoji(*values: Any) -> str:
     for value in values:
-        text = _normalize_text(value)
-        if text:
-            return text
-    return default
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        if num > 0:
+            return "📈"
+        if num < 0:
+            return "📉"
+    return ""
 
 
-def _event_id(event: dict[str, Any]) -> str:
-    return _first_string(event.get("id"), event.get("eventId"), event.get("event_id"), event.get("slug"), default="unknown")
+def _label_from_payload(payload: Any, default: str = "Untitled market") -> str:
+    if not isinstance(payload, dict):
+        return default
+    return _first_string(
+        _mapping_value(payload, "metadata", "name"),
+        _mapping_value(payload, "metadata", "title"),
+        _mapping_value(payload, "event", "metadata", "name"),
+        _mapping_value(payload, "event", "metadata", "title"),
+        payload.get("displayName"),
+        payload.get("display_name"),
+        payload.get("eventName"),
+        payload.get("event_name"),
+        payload.get("name"),
+        payload.get("title"),
+        payload.get("question"),
+        payload.get("marketName"),
+        payload.get("market_name"),
+        payload.get("marketTitle"),
+        payload.get("market_title"),
+        payload.get("marketLabel"),
+        payload.get("market_label"),
+        payload.get("label"),
+        payload.get("symbol"),
+        default=default,
+    )
 
 
 def _event_title(event: dict[str, Any]) -> str:
-    return _first_string(
-        event.get("title"),
-        event.get("name"),
-        event.get("question"),
-        event.get("marketName"),
-        event.get("label"),
-        event.get("symbol"),
-        default="Untitled market",
-    )
+    return _label_from_payload(event)
+
+
+def _market_title(market: dict[str, Any]) -> str:
+    return _label_from_payload(market)
 
 
 def _event_description(event: dict[str, Any]) -> str:
@@ -191,49 +175,140 @@ def _event_direction(event: dict[str, Any]) -> str:
     )
 
 
-def _event_button_label(event: dict[str, Any]) -> str:
-    emoji = _signal_emoji(_event_direction(event))
-    title = _event_title(event)
-    if emoji:
-        return f"{emoji} {title}"
-    return title
+def _market_direction(market: dict[str, Any]) -> str:
+    return _first_string(
+        market.get("direction"),
+        market.get("side"),
+        market.get("signal"),
+        _mapping_value(market, "pricing", "direction"),
+        _mapping_value(market, "pricing", "trend"),
+    )
 
 
-def _watchlist_keyboard(events: Iterable[dict[str, Any]]) -> InlineKeyboardMarkup:
-    rows = []
-    for event in events:
-        event_id = _event_id(event)
-        rows.append([InlineKeyboardButton(_event_button_label(event), callback_data=f"watch:{event_id}")])
+def _quote_text(response: QuoteResponse) -> str:
+    quote = response.quote
+    raw = response.raw or {}
+    title = _first_string(
+        _mapping_value(raw, "metadata", "name"),
+        _mapping_value(raw, "metadata", "title"),
+        _mapping_value(raw, "event", "metadata", "name"),
+        _mapping_value(raw, "event", "metadata", "title"),
+        raw.get("marketTitle"),
+        raw.get("marketName"),
+        quote.symbol,
+        default="Unknown market",
+    )
+    direction = _first_string(raw.get("direction"), raw.get("trend"), raw.get("signal"), raw.get("bias"))
+    emoji = _signal_emoji(direction) or _price_direction_emoji(raw.get("change"), raw.get("changePercent"), raw.get("priceChange"))
+    move_text = _first_string(raw.get("changeDirection"), raw.get("move"), raw.get("movement"), direction)
+    parts = [f"Quote for {_bold(title)}"]
+    parts.append(f"Bid: {_code(_format_number(quote.bid))} Ask: {_code(_format_number(quote.ask))}")
+    parts.append(f"Last: {_code(_format_number(quote.last))} Mark: {_code(_format_number(quote.mark))}")
+    parts.append(f"Midpoint: {_code(_format_number(quote.midpoint))}")
+    if emoji or move_text:
+        parts.append(f"Move: {emoji + ' ' if emoji else ''}{_safe_html(move_text or 'steady')}")
+    timestamp = quote.timestamp or raw.get("updatedAt") or raw.get("timestamp")
+    if timestamp:
+        parts.append(f"Updated: {_code(timestamp)}")
+    return "\n".join(parts)
 
-    rows.append([InlineKeyboardButton("Refresh list", callback_data="watch:refresh")])
-    return InlineKeyboardMarkup(rows)
+
+def _order_text(response: OrderResponse) -> str:
+    order = response.order
+    raw = response.raw or {}
+    emoji = _side_emoji(order.side) or _signal_emoji(order.side)
+    side_emoji = _signal_emoji(order.side) or _side_emoji(order.side)
+    parts = [f"{emoji} <b>Order update</b>" if emoji else "<b>Order update</b>"]
+
+    event_title = _first_string(
+        _mapping_value(raw, "event", "metadata", "name"),
+        _mapping_value(raw, "event", "metadata", "title"),
+        _mapping_value(raw, "event", "name"),
+        _mapping_value(raw, "event", "title"),
+        raw.get("eventTitle"),
+    )
+    market_title = _first_string(
+        _mapping_value(raw, "market", "metadata", "name"),
+        _mapping_value(raw, "market", "metadata", "title"),
+        _mapping_value(raw, "market", "name"),
+        _mapping_value(raw, "market", "title"),
+        raw.get("marketTitle"),
+    )
+    if event_title:
+        parts.append(f"Event: {_bold(event_title)}")
+    if market_title:
+        parts.append(f"Market: {_bold(market_title)}")
+
+    parts.extend([
+        f"Status: {_safe_html(order.status or 'n/a')}",
+        f"Side: {side_emoji + ' ' if side_emoji else ''}{_safe_html(order.side or 'n/a')}",
+        f"Type: {_safe_html(order.order_type or raw.get('type') or 'n/a')}",
+        f"Outcome: {_safe_html(_first_string(raw.get('outcome'), raw.get('outcomeId'), raw.get('outcome_id'), raw.get('outcomeIndex')) or 'n/a')}",
+        f"Amount: {_code(_format_number(raw.get('amount') or order.quantity))}",
+        f"Price: {_code(_format_number(order.limit_price or raw.get('price')))}",
+        f"Filled: {_code(_format_number(order.filled_quantity or raw.get('filled')))}",
+        f"Avg fill: {_code(_format_number(order.average_fill_price))}",
+    ])
+    if order.created_at or raw.get('createdAt'):
+        parts.append(f"Created: {_code(order.created_at or raw.get('createdAt'))}")
+    if order.updated_at or raw.get('updatedAt'):
+        parts.append(f"Updated: {_code(order.updated_at or raw.get('updatedAt'))}")
+    parts.append(GENERAL_QUANT_GUIDANCE.capitalize())
+    return "\n".join(parts)
+
+
+def _error_text(exc: BayseClientError) -> str:
+    if exc.error is not None:
+        details = []
+        if exc.error.code:
+            details.append(f"code: {exc.error.code}")
+        details.append(f"message: {exc.error.message}")
+        if exc.error.details:
+            details.append(f"details: {exc.error.details}")
+        return "Bayse API error\n" + "\n".join(details)
+    if exc.status_code is not None:
+        return f"Bayse API error\nstatus: {exc.status_code}\nmessage: {exc}"
+    return f"Bayse API error\nmessage: {exc}"
+
+
+def _extract_collection(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in ("events", "items", "results", "data", "markets"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = _extract_collection(value)
+            if nested:
+                return nested
+    return []
 
 
 def _watchlist_text(events: list[dict[str, Any]]) -> str:
-    lines = ["What do you want to watch?"]
+    lines = ["<b>What do you want to watch?</b>"]
     for index, event in enumerate(events, start=1):
         emoji = _signal_emoji(_event_direction(event))
         prefix = f"{emoji} " if emoji else ""
         title = _event_title(event)
         description = _event_description(event)
-        line = f"{index}. {prefix}{title}"
+        line = f"{index}. {prefix}<b>{_safe_html(title)}</b>"
         if description:
-            line += f" — {description}"
+            line += f" — {_safe_html(description)}"
         lines.append(line)
     return "\n".join(lines)
 
 
 def _watchlist_details(event: dict[str, Any]) -> str:
-    lines = [
-        f"Watching: {_event_title(event)}",
-        f"event id: {_event_id(event)}",
-    ]
+    lines = [f"Watching: {_bold(_event_title(event))}"]
     description = _event_description(event)
     if description:
-        lines.append(f"details: {description}")
+        lines.append(f"Details: {_safe_html(description)}")
     direction = _event_direction(event)
     if direction:
-        lines.append(f"signal: {direction}")
+        lines.append(f"Signal: {_signal_emoji(direction)} {_safe_html(direction)}".strip())
     return "\n".join(lines)
 
 
@@ -247,10 +322,8 @@ def _watch_category_from_text(text: str) -> Optional[str]:
     if not normalized.startswith("watch"):
         return None
     args = _split_args(text)
-    if not args:
-        return None
-    if args[0].lower() == "watch" and len(args) >= 2:
-        category = args[1].strip(".,:;!?")
+    if len(args) >= 2 and args[0].lower() == "watch":
+        category = " ".join(args[1:]).strip(".,:;!?")
         return category or None
     return None
 
@@ -259,13 +332,13 @@ def _general_plain_text_response(text: str) -> CommandResult:
     normalized = _normalize_text(text).lower()
     if any(phrase in normalized for phrase in ("buy", "sell", "should i", "am i", "entry", "exit", "long", "short")):
         return CommandResult(True, "\n".join([
-            "If you want buy/sell guidance, give me a symbol or market id.",
+            "If you want buy/sell guidance, give me a market name or symbol.",
             GENERAL_QUANT_GUIDANCE,
             "I can also show a quote, watch a category, or list your portfolio.",
         ]))
     if normalized:
         return CommandResult(True, "\n".join([
-            f"I read: {text}",
+            f"I read: {_safe_html(text)}",
             "I can help with quotes, watchlists, balances, orders, and portfolio checks.",
             "Try: watch crypto, quote BTC, /help",
         ]))
@@ -275,7 +348,7 @@ def _general_plain_text_response(text: str) -> CommandResult:
 def build_quote_command(client: BayseClient, text: str) -> CommandResult:
     args = _split_args(text)
     if not args:
-        return CommandResult(False, "Usage: /quote MARKET_ID")
+        return CommandResult(False, "Usage: /quote <market name or symbol>")
     market_id = args[0]
     try:
         response = QuoteResponse.from_dict(client.get_ticker(market_id))
@@ -289,7 +362,7 @@ def build_quote_command(client: BayseClient, text: str) -> CommandResult:
 def build_order_command(client: BayseClient, text: str) -> CommandResult:
     args = _split_args(text)
     if len(args) < 6:
-        return CommandResult(False, "Usage: /order EVENT_ID MARKET_ID OUTCOME SIDE AMOUNT CURRENCY [PRICE] [LIMIT|MARKET]")
+        return CommandResult(False, "Usage: /order <event name> <market name> <outcome> <buy|sell> <amount> <currency> [price] [LIMIT|MARKET]")
 
     event_id = args[0]
     market_id = args[1]
@@ -299,7 +372,7 @@ def build_order_command(client: BayseClient, text: str) -> CommandResult:
     try:
         amount = float(args[4])
     except ValueError:
-        return CommandResult(False, "Usage: /order EVENT_ID MARKET_ID OUTCOME SIDE AMOUNT CURRENCY [PRICE] [LIMIT|MARKET]")
+        return CommandResult(False, "Usage: /order <event name> <market name> <outcome> <buy|sell> <amount> <currency> [price] [LIMIT|MARKET]")
 
     currency = args[5].upper()
     price: Optional[float] = None
@@ -314,7 +387,7 @@ def build_order_command(client: BayseClient, text: str) -> CommandResult:
         except ValueError:
             order_type = trailing.upper()
             if order_type not in {"LIMIT", "MARKET"}:
-                return CommandResult(False, "Usage: /order EVENT_ID MARKET_ID OUTCOME SIDE AMOUNT CURRENCY [PRICE] [LIMIT|MARKET]")
+                return CommandResult(False, "Usage: /order <event name> <market name> <outcome> <buy|sell> <amount> <currency> [price] [LIMIT|MARKET]")
             if order_type == "MARKET":
                 price = None
 
@@ -338,15 +411,15 @@ def build_order_command(client: BayseClient, text: str) -> CommandResult:
 
 def build_watchlist_command(client: BayseClient, text: str = "") -> CommandResult:
     try:
-        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE)
+        category = _watch_category_from_text(text)
+        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params={"category": category} if category else None)
         events = _extract_collection(payload)
         if not events:
             return CommandResult(False, "No markets or events were returned by Bayse.")
-        raw = {"events": events, "payload": payload}
-        category = _watch_category_from_text(text)
+        raw = {"events": events, "payload": payload, "category": category}
         heading = _watchlist_text(events)
         if category:
-            heading = "\n".join([f"Watching category: {category}", heading])
+            heading = "\n".join([f"<b>Watching category:</b> {_safe_html(category)}", heading])
         return CommandResult(True, heading, raw=raw)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
@@ -354,13 +427,14 @@ def build_watchlist_command(client: BayseClient, text: str = "") -> CommandResul
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
-def format_signal_message(direction: Any, title: str, details: Optional[str] = None) -> str:
-    emoji = _signal_emoji(direction)
-    header = f"{emoji} {title}" if emoji else title
-    parts = [header]
-    if details:
-        parts.append(details)
-    return "\n".join(parts)
+def build_balance_command(client: BayseClient, text: str = "") -> CommandResult:
+    try:
+        payload = client.get_portfolio()
+        return CommandResult(True, _portfolio_text(payload, "Wallet balance"), raw=payload)
+    except BayseClientError as exc:
+        return CommandResult(False, _error_text(exc))
+    except Exception as exc:
+        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
 def _portfolio_mapping(payload: Any) -> dict[str, Any]:
@@ -376,7 +450,7 @@ def _portfolio_mapping(payload: Any) -> dict[str, Any]:
 def _portfolio_text(payload: Any, heading: str) -> str:
     data = _portfolio_mapping(payload)
     positions = _extract_collection(data.get("positions") or data.get("openPositions") or data.get("holdings") or [])
-    lines = [heading]
+    lines = [f"<b>{_safe_html(heading)}</b>"]
 
     balance = _first_string(
         data.get("balance"),
@@ -386,43 +460,29 @@ def _portfolio_text(payload: Any, heading: str) -> str:
         data.get("cash"),
         default="n/a",
     )
-    lines.append(f"wallet balance: {balance}")
+    lines.append(f"Wallet balance: {_code(balance)}")
 
     if positions:
-        lines.append("open positions:")
+        lines.append("Open positions:")
         for idx, position in enumerate(positions, start=1):
             title = _first_string(
+                _mapping_value(position, "metadata", "name"),
+                _mapping_value(position, "metadata", "title"),
                 position.get("title"),
                 position.get("name"),
                 position.get("marketName"),
+                position.get("market_name"),
                 position.get("symbol"),
-                position.get("id"),
                 default=f"Position {idx}",
             )
-            size = _first_string(
-                position.get("quantity"),
-                position.get("size"),
-                position.get("amount"),
-                position.get("exposure"),
-                default="n/a",
-            )
+            size = _first_string(position.get("quantity"), position.get("size"), position.get("amount"), position.get("exposure"), default="n/a")
             direction = _signal_emoji(position.get("direction") or position.get("side") or position.get("sentiment"))
             prefix = f"{direction} " if direction else ""
-            lines.append(f"{idx}. {prefix}{title} — {size}")
+            lines.append(f"{idx}. {prefix}<b>{_safe_html(title)}</b> — {_code(size)}")
     else:
-        lines.append("open positions: none")
+        lines.append("Open positions: none")
 
     return "\n".join(lines)
-
-
-def build_balance_command(client: BayseClient, text: str = "") -> CommandResult:
-    try:
-        payload = client.get_portfolio()
-        return CommandResult(True, _portfolio_text(payload, "Wallet balance"), raw=payload)
-    except BayseClientError as exc:
-        return CommandResult(False, _error_text(exc))
-    except Exception as exc:
-        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
 def build_portfolio_command(client: BayseClient, text: str = "") -> CommandResult:
@@ -438,19 +498,26 @@ def build_portfolio_command(client: BayseClient, text: str = "") -> CommandResul
 def build_help_command() -> CommandResult:
     return CommandResult(
         True,
-        "\n".join(
-            [
-                "Medes Et Bayse commands:",
-                "/quote MARKET_ID - Get a market quote",
-                "/order EVENT_ID MARKET_ID OUTCOME SIDE AMOUNT CURRENCY [PRICE] [LIMIT|MARKET] - Place a trade order",
-                "/balance - Check your wallet balance",
-                "/portfolio - View open positions",
-                "/events - List active markets",
-                "/help - Show bot usage info",
-                "Quant best practices: prefer limit orders, size positions deliberately, and define an exit before entry.",
-            ]
-        ),
+        "\n".join([
+            "<b>Medes Et Bayse commands</b>",
+            "/quote <code>market name or symbol</code> - Get a market quote",
+            "/order <code>event name</code> <code>market name</code> <code>outcome</code> <code>buy|sell</code> <code>amount</code> <code>currency</code> [price] [LIMIT|MARKET] - Place a trade order",
+            "/balance - Check your wallet balance",
+            "/portfolio - View open positions",
+            "/events - List active markets",
+            "/help - Show bot usage info",
+            GENERAL_QUANT_GUIDANCE.capitalize(),
+        ]),
     )
+
+
+def format_signal_message(direction: Any, title: str, details: Optional[str] = None) -> str:
+    emoji = _signal_emoji(direction)
+    header = f"{emoji} {title}" if emoji else title
+    parts = [header]
+    if details:
+        parts.append(details)
+    return "\n".join(parts)
 
 
 def _order_scenario_from_result(result: CommandResult) -> Optional[str]:
@@ -466,8 +533,6 @@ def _order_scenario_from_result(result: CommandResult) -> Optional[str]:
     if side in {"sell", "short", "down", "bear", "bearish", "put"}:
         return "bear"
     return None
-
-
 
 
 def _looks_like_watch_intent(text: str) -> bool:
@@ -495,7 +560,7 @@ def _looks_like_quote_intent(text: str) -> bool:
     return any(keyword in normalized for keyword in ("quote", "price", "ticker"))
 
 
-def build_natural_language_command(client: BayseClient, text: str) -> Optional[CommandResult]:
+def build_natural_language_command(client: BayseClient, text: str) -> CommandResult:
     if not _normalize_text(text):
         return _general_plain_text_response(text)
     if _looks_like_watch_intent(text):
@@ -508,19 +573,13 @@ def build_natural_language_command(client: BayseClient, text: str) -> Optional[C
         return build_help_command()
     if _looks_like_quote_intent(text):
         args = _split_args(text)
-        if args and args[0].startswith("/"):
+        if args and args[0].startswith('/'):
             args = args[1:]
-        symbol = next((token for token in args if token.lower() not in {"quote", "price", "ticker", "of", "for", "the", "a"}), None)
+        symbol = next((token for token in args if token.lower() not in {'quote', 'price', 'ticker', 'of', 'for', 'the', 'a'}), None)
         if symbol:
             return build_quote_command(client, f"/quote {symbol}")
-        return CommandResult(False, "Say a market id or symbol after quote, for example: quote BTC")
+        return CommandResult(False, "Say a market name or symbol after quote, for example: quote BTC")
     return _general_plain_text_response(text)
-def format_quote_response(response: QuoteResponse) -> str:
-    return _quote_text(response)
-
-
-def format_order_response(response: OrderResponse) -> str:
-    return _order_text(response)
 
 
 def is_debug_spam_message(text: Any) -> bool:
@@ -529,7 +588,6 @@ def is_debug_spam_message(text: Any) -> bool:
 
 def sticker_config_from_env() -> StickerSetConfig:
     import os
-
     return StickerSetConfig(
         bull=os.getenv("MEDES_BULL_STICKER_FILE_ID"),
         bear=os.getenv("MEDES_BEAR_STICKER_FILE_ID"),
@@ -577,19 +635,17 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
         text = getattr(message, "text", "") or ""
         print(json.dumps({"telegram": "incoming_text", "text": text}, ensure_ascii=False), flush=True)
         result = build_natural_language_command(client, text)
-        if result is None:
-            result = _general_plain_text_response(text)
         if not result.ok:
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
-            await message.reply_text(result.text)
+            await message.reply_text(result.text, parse_mode="HTML")
             return
         if result.raw and isinstance(result.raw, dict) and result.raw.get("events"):
             events = result.raw.get("events", [])
             print(json.dumps({"telegram": "text_routed", "route": "watchlist", "text": text}, ensure_ascii=False), flush=True)
-            await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events))
+            await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
             return
         print(json.dumps({"telegram": "text_routed", "route": "general", "text": text}, ensure_ascii=False), flush=True)
-        await message.reply_text(result.text)
+        await message.reply_text(result.text, parse_mode="HTML")
 
     return handler
 
@@ -603,7 +659,7 @@ def quote_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         result = build_quote_command(client, text)
         if _should_suppress_debug_message(result.text):
             return
-        await message.reply_text(result.text)
+        await message.reply_text(result.text, parse_mode="HTML")
 
     return handler
 
@@ -617,7 +673,7 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         result = build_order_command(client, text)
         if _should_suppress_debug_message(result.text):
             return
-        await message.reply_text(result.text)
+        await message.reply_text(result.text, parse_mode="HTML")
         scenario = _order_scenario_from_result(result)
         if scenario:
             await send_scenario_sticker(message, scenario)
@@ -632,10 +688,10 @@ def watchlist_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             return
         result = build_watchlist_command(client)
         if not result.ok:
-            await message.reply_text(result.text)
+            await message.reply_text(result.text, parse_mode="HTML")
             return
         events = result.raw.get("events", []) if result.raw else []
-        await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events))
+        await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
 
     return handler
 
@@ -655,10 +711,10 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
         if selected == "refresh":
             result = build_watchlist_command(client)
             if not result.ok:
-                await query.edit_message_text(result.text)
+                await query.edit_message_text(result.text, parse_mode="HTML")
                 return
             events = result.raw.get("events", []) if result.raw else []
-            await query.edit_message_text(result.text, reply_markup=_watchlist_keyboard(events))
+            await query.edit_message_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
             return
 
         try:
@@ -666,7 +722,7 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             events = _extract_collection(payload)
             event = events[0] if events else payload if isinstance(payload, dict) else {}
         except BayseClientError as exc:
-            await query.edit_message_text(_error_text(exc))
+            await query.edit_message_text(_error_text(exc), parse_mode="HTML")
             return
         except Exception as exc:
             await query.edit_message_text(f"Bayse API error\nmessage: {exc}")
@@ -679,10 +735,8 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
         context.user_data["watchlist_event"] = event
 
         details = _watchlist_details(event)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Refresh list", callback_data="watch:refresh")],
-        ])
-        await query.edit_message_text(details, reply_markup=keyboard)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Refresh list", callback_data="watch:refresh")]])
+        await query.edit_message_text(details, reply_markup=keyboard, parse_mode="HTML")
         direction = _event_direction(event)
         if direction:
             await send_scenario_sticker(query.message, direction)

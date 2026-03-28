@@ -108,6 +108,7 @@ def _order_text(response: OrderResponse) -> str:
         f"average fill price: {_format_number(order.average_fill_price)}",
         f"created at: {order.created_at or raw.get('createdAt') or 'n/a'}",
         f"updated at: {order.updated_at or raw.get('updatedAt') or 'n/a'}",
+        "quant best practice: prefer limit orders, size positions deliberately, and define an exit before entry.",
     ]
     return "\n".join(parts)
 
@@ -410,6 +411,7 @@ def build_help_command() -> CommandResult:
                 "/portfolio - View open positions",
                 "/events - List active markets",
                 "/help - Show bot usage info",
+                "Quant best practices: prefer limit orders, size positions deliberately, and define an exit before entry.",
             ]
         ),
     )
@@ -430,6 +432,53 @@ def _order_scenario_from_result(result: CommandResult) -> Optional[str]:
     return None
 
 
+
+
+def _looks_like_watch_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("watch", "watchlist", "monitor", "track", "follow", "list markets", "active markets", "market events", "economy trades", "trades"))
+
+
+def _looks_like_balance_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("balance", "wallet", "cash", "funds"))
+
+
+def _looks_like_portfolio_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("portfolio", "positions", "holdings", "open positions"))
+
+
+def _looks_like_help_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("help", "how do i use", "usage", "commands"))
+
+
+def _looks_like_quote_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("quote", "price", "ticker"))
+
+
+def build_natural_language_command(client: BayseClient, text: str) -> Optional[CommandResult]:
+    if not _normalize_text(text):
+        return None
+    if _looks_like_watch_intent(text):
+        return build_watchlist_command(client)
+    if _looks_like_balance_intent(text):
+        return build_balance_command(client)
+    if _looks_like_portfolio_intent(text):
+        return build_portfolio_command(client)
+    if _looks_like_help_intent(text):
+        return build_help_command()
+    if _looks_like_quote_intent(text):
+        args = _split_args(text)
+        if args and args[0].startswith("/"):
+            args = args[1:]
+        symbol = next((token for token in args if token.lower() not in {"quote", "price", "ticker", "of", "for", "the", "a"}), None)
+        if symbol:
+            return build_quote_command(client, f"/quote {symbol}")
+        return CommandResult(False, "Say a market id or symbol after quote, for example: quote BTC")
+    return None
 def format_quote_response(response: QuoteResponse) -> str:
     return _quote_text(response)
 
@@ -482,6 +531,27 @@ async def send_scenario_sticker(message: Any, scenario: str, *, config: Optional
 
     await bot.send_sticker(chat_id=getattr(message.chat, "id", None), sticker=sticker_file_id)
     return True
+
+
+def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
+    async def handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        text = getattr(message, "text", "") or ""
+        result = build_natural_language_command(client, text)
+        if result is None:
+            return
+        if not result.ok:
+            await message.reply_text(result.text)
+            return
+        if result.raw and isinstance(result.raw, dict) and result.raw.get("events"):
+            events = result.raw.get("events", [])
+            await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events))
+            return
+        await message.reply_text(result.text)
+
+    return handler
 
 
 def quote_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:

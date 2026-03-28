@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from typing import Any, Dict, Mapping, Optional
 from urllib import error, parse, request
 
 from .auth import BayseAuth
 from .models import BayseError, Order, OrderResponse, Quote, QuoteResponse
+
+
+logger = logging.getLogger(__name__)
 
 
 class BayseClientError(RuntimeError):
@@ -20,6 +24,7 @@ class BayseClientError(RuntimeError):
 class BayseClient:
     api_key: str
     api_secret: str
+    user_id: Optional[str] = None
     base_url: str = "https://relay.bayse.markets"
     api_version: str = "v1"
     timeout: float = 30.0
@@ -50,11 +55,17 @@ class BayseClient:
 
     def _build_url(self, path: str, params: Optional[Mapping[str, Any]] = None) -> str:
         full_path = self._versioned_path(path)
-        url = f"{self.base_url.rstrip('/')}" + full_path
+        url = f"{self.base_url.rstrip('/')}{full_path}"
         if params:
             query = parse.urlencode({k: v for k, v in params.items() if v is not None})
             url = f"{url}?{query}"
         return url
+
+    def _scoped_params(self, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = dict(params or {})
+        if self.user_id:
+            query.setdefault("userId", self.user_id)
+        return query
 
     def _parse_response(self, payload: str) -> Dict[str, Any]:
         if not payload:
@@ -84,8 +95,14 @@ class BayseClient:
 
         if auth == "read":
             headers[self.api_key_header] = self.api_key
+        elif auth == "private":
+            headers.update(self._auth.sign(method=method, path=versioned_path, body=body_for_signing))
+            if self.user_id:
+                headers.setdefault("X-User-Id", self.user_id)
         elif auth == "write":
             headers.update(self._auth.sign(method=method, path=versioned_path, body=body_for_signing))
+            if self.user_id:
+                headers.setdefault("X-User-Id", self.user_id)
         elif auth == "session":
             raise ValueError("session auth requires explicit session headers")
 
@@ -102,7 +119,10 @@ class BayseClient:
         try:
             with request.urlopen(req, timeout=self.timeout) as resp:
                 payload = resp.read().decode("utf-8")
-                return self._parse_response(payload)
+                parsed = self._parse_response(payload)
+                if path in {"/pm/balance", "/pm/portfolio", "/wallet/assets"} and isinstance(parsed, dict):
+                    logger.info("Bayse fetched %s successfully", path)
+                return parsed
         except error.HTTPError as exc:
             raw = exc.read().decode("utf-8") if exc.fp else ""
             parsed_error: Optional[BayseError] = None
@@ -150,14 +170,17 @@ class BayseClient:
     def get_event_by_slug(self, slug: str) -> Dict[str, Any]:
         return self._request("GET", f"/pm/events/slug/{slug}", auth="read")
 
+    def get_balance(self) -> Dict[str, Any]:
+        return self._request("GET", "/pm/balance", params=self._scoped_params(), auth="private")
+
     def get_portfolio(self) -> Dict[str, Any]:
-        return self._request("GET", "/pm/portfolio", auth="read")
+        return self._request("GET", "/pm/portfolio", params=self._scoped_params(), auth="private")
 
     def get_assets(self) -> Dict[str, Any]:
-        return self._request("GET", "/wallet/assets", auth="read")
+        return self._request("GET", "/wallet/assets", params=self._scoped_params(), auth="private")
 
     def list_orders(self, *, params: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-        return self._request("GET", "/pm/orders", params=params, auth="read")
+        return self._request("GET", "/pm/orders", params=self._scoped_params(params), auth="private")
 
     def get_order(self, order_id: str) -> OrderResponse:
         payload = self._request("GET", f"/pm/orders/{order_id}", auth="read")
@@ -219,7 +242,7 @@ class BayseClient:
             "POST",
             f"/pm/events/{event_id}/markets/{market_id}/quote",
             json_body=dict(quote) if quote is not None else None,
-            auth="write",
+            auth="read",
         )
 
     def place_order(
@@ -253,19 +276,19 @@ class BayseClient:
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         return self._request("DELETE", f"/pm/orders/{order_id}", auth="write")
 
-    def mint_shares(self, market_id: str, amount: float) -> Dict[str, Any]:
+    def mint_shares(self, market_id: str, quantity: float, *, currency: str = "USD") -> Dict[str, Any]:
         return self._request(
             "POST",
             f"/pm/markets/{market_id}/mint",
-            json_body={"amount": amount},
+            json_body={"quantity": quantity, "currency": currency.upper()},
             auth="write",
         )
 
-    def burn_shares(self, market_id: str, amount: float) -> Dict[str, Any]:
+    def burn_shares(self, market_id: str, quantity: float, *, currency: str = "USD") -> Dict[str, Any]:
         return self._request(
             "POST",
             f"/pm/markets/{market_id}/burn",
-            json_body={"amount": amount},
+            json_body={"quantity": quantity, "currency": currency.upper()},
             auth="write",
         )
 

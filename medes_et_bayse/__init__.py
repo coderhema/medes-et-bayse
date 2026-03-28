@@ -1,11 +1,12 @@
 from .auth import BayseAuth, build_canonical_request, sign_hmac_sha256
 from .client import BayseClient, BayseClientError
-from .config import BayseRuntimeConfig, load_runtime_config, runtime_config
+from .config import BayseRuntimeConfig, build_client, load_runtime_config, runtime_config
 from .telegram_handlers import (
     CommandResult,
     StickerSetConfig,
     build_balance_command,
     build_fund_command,
+    build_events_command,
     build_help_command,
     build_natural_language_command,
     build_order_command,
@@ -23,6 +24,7 @@ from .telegram_handlers import (
     quote_handler_factory,
     send_scenario_sticker,
     sticker_config_from_env,
+    events_handler_factory,
     watchlist_callback_handler_factory,
     watchlist_handler_factory,
     withdraw_handler_factory,
@@ -36,12 +38,14 @@ __all__ = [
     'BayseClient',
     'BayseClientError',
     'BayseRuntimeConfig',
+    'build_client',
     'load_runtime_config',
     'runtime_config',
     'CommandResult',
     'StickerSetConfig',
     'build_balance_command',
     'build_fund_command',
+    'build_events_command',
     'build_help_command',
     'build_natural_language_command',
     'build_order_command',
@@ -59,6 +63,7 @@ __all__ = [
     'quote_handler_factory',
     'send_scenario_sticker',
     'sticker_config_from_env',
+    'events_handler_factory',
     'watchlist_callback_handler_factory',
     'watchlist_handler_factory',
     'withdraw_handler_factory',

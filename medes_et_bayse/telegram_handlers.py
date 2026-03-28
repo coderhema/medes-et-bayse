@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
+import logging
+import os
+import re
 from html import escape as html_escape
 from typing import Any, Callable, Iterable, Optional
+from urllib import error, request
 
 from .client import BayseClient, BayseClientError
 from .models import OrderResponse, QuoteResponse
@@ -18,6 +23,7 @@ except Exception:  # pragma: no cover
 DEBUG_SPAM_PHRASES = {"no signals this cycle"}
 WATCHLIST_PAGE_SIZE = 10
 GENERAL_QUANT_GUIDANCE = "quant best practice: prefer limit orders, size positions deliberately, and define an exit before entry."
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -507,6 +513,136 @@ def _wallet_assets_text(payload: Any, *, asset_filter: Optional[str] = None, pur
     return chr(10).join(lines).strip()
 
 
+SMART_TRADE_MIN_PATTERN = re.compile(r"\b(buy|sell)\b", re.IGNORECASE)
+SMART_TRADE_AMOUNT_PATTERN = re.compile(r"(?<!\w)(\d+(?:\.\d+)?)(?!\w)")
+SMART_TRADE_CURRENCY_PATTERN = re.compile(r"\b(NGN|USD)\b", re.IGNORECASE)
+DETAIL_PREVIEW_LINE_LIMIT = 7
+
+
+def _detail_view_bucket(context: Any) -> dict[str, dict[str, Any]]:
+    if context is None:
+        return {}
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return {}
+    bucket = data.get("detail_views")
+    if not isinstance(bucket, dict):
+        bucket = {}
+        data["detail_views"] = bucket
+    return bucket
+
+
+def _detail_view_key(prefix: str, identifier: str) -> str:
+    base = f"{prefix}:{identifier}".strip(":")
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+
+
+def _detail_preview_text(full_text: str, *, limit_lines: int = DETAIL_PREVIEW_LINE_LIMIT) -> str:
+    lines = (full_text or "").split(chr(10))
+    if len(lines) <= limit_lines:
+        return full_text
+    preview = lines[:limit_lines]
+    preview.append("Tap View more for the full details.")
+    return chr(10).join(preview)
+
+
+def _detail_keyboard(view_key: str, *, back_callback: Optional[str] = None, view_more: bool = True, back_label: str = "Back") -> Any:
+    rows = []
+    if view_more:
+        rows.append([InlineKeyboardButton("View more", callback_data=f"more:{view_key}")])
+    if back_callback:
+        rows.append([InlineKeyboardButton(back_label, callback_data=back_callback)])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _prepare_detail_view(
+    context: Any,
+    *,
+    prefix: str,
+    identifier: str,
+    full_text: str,
+    back_callback: Optional[str] = None,
+    back_label: str = "Back",
+) -> tuple[str, Any]:
+    key = _detail_view_key(prefix, identifier)
+    bucket = _detail_view_bucket(context)
+    bucket[key] = {"text": full_text, "back_callback": back_callback, "back_label": back_label}
+    preview = _detail_preview_text(full_text)
+    if preview != full_text:
+        return preview, _detail_keyboard(key, back_callback=back_callback, view_more=True, back_label=back_label)
+    return full_text, _detail_keyboard(key, back_callback=back_callback, view_more=False, back_label=back_label)
+
+
+def _smart_trade_currency(candidate: dict[str, Any]) -> str:
+    currency = _first_string(candidate.get("currency"), default="USD").upper()
+    if "," in currency:
+        currency = currency.split(",", 1)[0].strip() or "USD"
+    return currency
+
+
+def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str, Any]:
+    prompt = {
+        "task": "parse_short_trade_reply",
+        "instruction": "Parse a short Bayse trade reply into side, amount, currency, outcome, and whether the currency should be normalized to the market currency.",
+        "text": text,
+        "active_context": {
+            "event_title": candidate.get("event_title"),
+            "market_title": candidate.get("market_title"),
+            "event_id": candidate.get("event_id"),
+            "market_id": candidate.get("market_id"),
+            "supported_currency": candidate.get("currency"),
+        },
+        "expected_shape": {
+            "side": "buy|sell",
+            "amount": 700,
+            "currency": "NGN|USD",
+            "outcome": "YES|NO",
+            "normalized_currency": "Bayse market currency",
+            "notes": "optional",
+        },
+    }
+
+    brain_url = os.getenv("POKE_BRAIN_URL", "").strip() or os.getenv("POKE_API_BRAIN_URL", "").strip()
+    poke_api_key = os.getenv("POKE_API_KEY", "").strip()
+    if brain_url:
+        try:
+            body = json.dumps(prompt).encode("utf-8")
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if poke_api_key:
+                headers["Authorization"] = f"Bearer {poke_api_key}"
+            req = request.Request(brain_url, data=body, headers=headers, method="POST")
+            with request.urlopen(req, timeout=12) as resp:
+                payload = resp.read().decode("utf-8")
+            if payload:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    return parsed.get("result") if isinstance(parsed.get("result"), dict) else parsed
+        except Exception:
+            pass
+
+    normalized = _normalize_text(text).lower()
+    side_match = SMART_TRADE_MIN_PATTERN.search(normalized)
+    amount_match = SMART_TRADE_AMOUNT_PATTERN.search(normalized)
+    currency_match = SMART_TRADE_CURRENCY_PATTERN.search(normalized)
+    if not side_match or not amount_match:
+        return {}
+    side = side_match.group(1).lower()
+    amount = float(amount_match.group(1))
+    currency = currency_match.group(1).upper() if currency_match else _smart_trade_currency(candidate)
+    return {
+        "side": side,
+        "amount": amount,
+        "currency": currency,
+        "outcome": "YES" if side == "buy" else "NO",
+        "normalized_currency": _smart_trade_currency(candidate),
+    }
+
+
+def _looks_like_smart_trade_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return bool(SMART_TRADE_MIN_PATTERN.search(normalized) and SMART_TRADE_AMOUNT_PATTERN.search(normalized))
+
+
 def _quote_candidate_label(candidate: dict[str, Any]) -> str:
     event_title = _truncate_text(candidate.get("event_title") or candidate.get("eventTitle") or candidate.get("event"), 28)
     market_title = _truncate_text(candidate.get("market_title") or candidate.get("marketTitle") or candidate.get("market"), 24)
@@ -845,6 +981,42 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
+def build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
+    active_candidate = _active_market_candidate(context)
+    if not isinstance(active_candidate, dict) or not active_candidate.get("event_id") or not active_candidate.get("market_id"):
+        return None
+    if not _looks_like_smart_trade_intent(text):
+        return None
+
+    parsed = _brain_parse_trade_intent(text, active_candidate)
+    if not parsed:
+        return CommandResult(False, "I couldn’t parse that trade. Try something like ‘Buy, 700 NGN’ or ‘Sell, 1 USD’.")
+
+    side = _normalize_text(parsed.get("side")).lower()
+    if side not in {"buy", "sell"}:
+        return CommandResult(False, "I couldn’t determine whether that was a buy or sell. Try again with buy or sell first.")
+
+    amount_value = parsed.get("amount")
+    try:
+        amount = float(amount_value)
+    except (TypeError, ValueError):
+        return CommandResult(False, "I couldn’t read the amount. Try something like ‘Buy, 700 NGN’.")
+
+    currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or _smart_trade_currency(active_candidate)).upper()
+    if not currency:
+        currency = _smart_trade_currency(active_candidate)
+
+    outcome = _normalize_text(parsed.get("outcome") or ("YES" if side == "buy" else "NO")).upper()
+    if not outcome:
+        outcome = "YES" if side == "buy" else "NO"
+
+    synthetic_text = f"{outcome} {side} {amount:g} {currency}"
+    result = build_order_command(client, synthetic_text, context=context)
+    if result.ok and isinstance(result.raw, dict):
+        return CommandResult(result.ok, result.text, raw={**result.raw, "smart_trade": True, "smart_trade_source": text, "smart_trade_parsed": parsed})
+    return result
+
+
 def build_events_command(client: BayseClient, text: str = "") -> CommandResult:
     term = _search_term_after(text, WATCH_STOP_WORDS)
     params: dict[str, Any] = {"status": "open"}
@@ -897,14 +1069,39 @@ def build_watchlist_command(client: BayseClient, text: str = "") -> CommandResul
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
+def _portfolio_payloads(client: BayseClient) -> list[tuple[str, Any]]:
+    payloads: list[tuple[str, Any]] = []
+    for label, fetcher in (("balance", client.get_balance), ("portfolio", client.get_portfolio)):
+        try:
+            payloads.append((label, fetcher()))
+        except BayseClientError as exc:
+            logger.info("Bayse %s request failed: %s", label, exc)
+        except Exception as exc:
+            logger.info("Bayse %s request failed: %s", label, exc)
+    return payloads
+
+
 def build_balance_command(client: BayseClient, text: str = "") -> CommandResult:
-    try:
-        payload = client.get_portfolio()
-        return CommandResult(True, _portfolio_text(payload, "Wallet balance"), raw=payload)
-    except BayseClientError as exc:
-        return CommandResult(False, _error_text(exc))
-    except Exception as exc:
-        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
+    last_error: Optional[BayseClientError] = None
+    last_payload: Any = None
+    for label, fetcher in (("balance", client.get_balance), ("portfolio", client.get_portfolio), ("assets", client.get_assets)):
+        try:
+            payload = fetcher()
+            last_payload = payload
+            balance_value = _portfolio_balance_value(payload)
+            logger.info("Bayse %s data fetched for balance command", label)
+            if balance_value != "n/a":
+                return CommandResult(True, _portfolio_text(payload, "Wallet balance"), raw=payload)
+        except BayseClientError as exc:
+            last_error = exc
+            logger.info("Bayse %s request failed for balance command: %s", label, exc)
+        except Exception as exc:
+            logger.info("Bayse %s request failed for balance command: %s", label, exc)
+    if last_payload is not None:
+        return CommandResult(True, _portfolio_text(last_payload, "Wallet balance"), raw=last_payload)
+    if last_error is not None:
+        return CommandResult(False, _error_text(last_error))
+    return CommandResult(False, "Bayse API error\nmessage: unable to fetch portfolio data")
 
 
 def _portfolio_mapping(payload: Any) -> dict[str, Any]:
@@ -912,25 +1109,73 @@ def _portfolio_mapping(payload: Any) -> dict[str, Any]:
         for key in ("portfolio", "data", "result", "wallet", "account"):
             value = payload.get(key)
             if isinstance(value, dict):
-                return value
+                nested = _portfolio_mapping(value)
+                if nested:
+                    return nested
         return payload
     return {}
 
 
+def _portfolio_collection(payload: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return _extract_collection(payload)
+    if not isinstance(payload, dict):
+        return []
+    for key in keys:
+        value = payload.get(key)
+        extracted = _extract_collection(value)
+        if extracted:
+            return extracted
+        if isinstance(value, dict):
+            nested = _portfolio_collection(value, keys)
+            if nested:
+                return nested
+    for value in payload.values():
+        if isinstance(value, dict):
+            nested = _portfolio_collection(value, keys)
+            if nested:
+                return nested
+    return []
+
+
+def _portfolio_balance_value(payload: Any) -> str:
+    data = _portfolio_mapping(payload)
+    for path in (
+        ("balance",),
+        ("walletBalance",),
+        ("availableBalance",),
+        ("cashBalance",),
+        ("cash",),
+        ("available",),
+        ("available_cash",),
+        ("totalBalance",),
+        ("settledBalance",),
+        ("equity",),
+        ("wallet", "balance"),
+        ("wallet", "availableBalance"),
+        ("wallet", "cashBalance"),
+        ("account", "balance"),
+        ("account", "availableBalance"),
+        ("portfolio", "balance"),
+        ("portfolio", "availableBalance"),
+        ("summary", "balance"),
+        ("summary", "availableBalance"),
+        ("balances", "cash"),
+        ("balances", "available"),
+        ("funds", "available"),
+    ):
+        value = _mapping_value(data, *path)
+        if value is not None and _normalize_text(value):
+            return _format_number(value)
+    return "n/a"
+
+
 def _portfolio_text(payload: Any, heading: str) -> str:
     data = _portfolio_mapping(payload)
-    positions = _extract_collection(data.get("positions") or data.get("openPositions") or data.get("holdings") or [])
+    positions = _portfolio_collection(payload, ("positions", "openPositions", "open_positions", "holdings", "portfolioPositions", "assets", "items"))
     lines = [f"<b>{_safe_html(heading)}</b>"]
 
-    balance = _first_string(
-        data.get("balance"),
-        data.get("walletBalance"),
-        data.get("availableBalance"),
-        data.get("cashBalance"),
-        data.get("cash"),
-        default="n/a",
-    )
-    lines.append(f"Wallet balance: {_code(balance)}")
+    lines.append(f"Wallet balance: {_code(_portfolio_balance_value(data))}")
 
     if positions:
         lines.append("Open positions:")
@@ -938,6 +1183,10 @@ def _portfolio_text(payload: Any, heading: str) -> str:
             title = _first_string(
                 _mapping_value(position, "metadata", "name"),
                 _mapping_value(position, "metadata", "title"),
+                _mapping_value(position, "market", "name"),
+                _mapping_value(position, "market", "title"),
+                _mapping_value(position, "market", "metadata", "name"),
+                _mapping_value(position, "market", "metadata", "title"),
                 position.get("title"),
                 position.get("name"),
                 position.get("marketName"),
@@ -945,7 +1194,7 @@ def _portfolio_text(payload: Any, heading: str) -> str:
                 position.get("symbol"),
                 default=f"Position {idx}",
             )
-            size = _first_string(position.get("quantity"), position.get("size"), position.get("amount"), position.get("exposure"), default="n/a")
+            size = _first_string(position.get("quantity"), position.get("size"), position.get("amount"), position.get("exposure"), position.get("availableBalance"), default="n/a")
             direction = _signal_emoji(position.get("direction") or position.get("side") or position.get("sentiment"))
             prefix = f"{direction} " if direction else ""
             lines.append(f"{idx}. {prefix}<b>{_safe_html(title)}</b> — {_code(size)}")
@@ -958,6 +1207,7 @@ def _portfolio_text(payload: Any, heading: str) -> str:
 def build_portfolio_command(client: BayseClient, text: str = "") -> CommandResult:
     try:
         payload = client.get_portfolio()
+        logger.info("Bayse portfolio data fetched for portfolio command")
         return CommandResult(True, _portfolio_text(payload, "Open positions"), raw=payload)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
@@ -973,6 +1223,7 @@ def build_help_command() -> CommandResult:
             "/quote <code>market name or symbol</code> - Search Bayse markets and pick one interactively (or send /quote alone to be prompted)",
             "/events [term] - List active markets or search by keyword (or send /events alone to be prompted)",
             "/order <code>event name</code> <code>market name</code> <code>outcome</code> <code>buy|sell</code> <code>amount</code> <code>currency</code> [price] [LIMIT|MARKET] - Place a trade order (or send /order alone for a guided prompt)",
+            "Reply with something short like ‘Buy, 700 NGN’ once a market is active and I’ll parse it for you",
             "/balance - Check your wallet balance",
             "/portfolio - View open positions",
             "/fund [NGN|USD] - Show funding options for the selected currency (or send /fund alone for buttons)",
@@ -1064,7 +1315,7 @@ def _general_plain_text_response(text: str) -> CommandResult:
     return CommandResult(True, chr(10).join([
         "<b>Medes Et Bayse</b>",
         "Try /events to browse markets, /quote to inspect one, or /order to place a trade.",
-        "If you already picked a market, just send quote or order and I’ll reuse the active context.",
+        "If you already picked a market, just send quote, order, or a short reply like “Buy, 700 NGN” and I’ll reuse the active context.",
         GENERAL_QUANT_GUIDANCE.capitalize(),
     ]))
 
@@ -1113,6 +1364,11 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
     if kind == "order":
         if not text_value:
             return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
+        smart_result = build_smart_trade_command(client, text_value, context=context)
+        if smart_result is not None:
+            if smart_result.ok:
+                _clear_pending_interaction(context)
+            return smart_result
         result = build_order_command(client, text_value, context=context)
         if result.ok:
             _clear_pending_interaction(context)
@@ -1142,6 +1398,9 @@ def build_natural_language_command(client: BayseClient, text: str) -> CommandRes
         return _general_plain_text_response(text)
     if _looks_like_quote_intent(text):
         return build_quote_command(client, text)
+    smart_trade = build_smart_trade_command(client, text)
+    if smart_trade is not None:
+        return smart_trade
     if _looks_like_order_intent(text):
         return build_order_command(client, text)
     if _looks_like_events_intent(text):
@@ -1318,6 +1577,16 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             return
         text = getattr(message, "text", "") or ""
         active_candidate = _active_market_candidate(context)
+        smart_result = build_smart_trade_command(client, text, context=context)
+        if smart_result is not None:
+            if not smart_result.ok:
+                await message.reply_text(smart_result.text, parse_mode="HTML")
+                return
+            await message.reply_text(smart_result.text, parse_mode="HTML")
+            scenario = _order_scenario_from_result(smart_result)
+            if scenario:
+                await send_scenario_sticker(message, scenario)
+            return
         needs_prompt = len(_split_args(text)) < 6 and not (active_candidate and len(_split_args(text)) >= 4)
         if needs_prompt:
             _set_pending_interaction(context, "order", prompt="What order do you want to place? Send outcome, buy|sell, amount, and currency.")
@@ -1384,11 +1653,23 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             return
 
         data = str(query.data)
-        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:")):
+        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:") or data.startswith("more:")):
             return
 
         await query.answer()
         prefix, selected = data.split(":", 1)
+
+        if prefix == "more":
+            bucket = _detail_view_bucket(context)
+            detail = bucket.get(selected)
+            if not isinstance(detail, dict):
+                await query.edit_message_text("That expanded view is no longer available.", parse_mode="HTML")
+                return
+            back_callback = _normalize_text(detail.get("back_callback")) or None
+            back_label = _normalize_text(detail.get("back_label")) or "Back"
+            keyboard = _detail_keyboard(selected, back_callback=back_callback, view_more=False, back_label=back_label)
+            await query.edit_message_text(str(detail.get("text") or ""), reply_markup=keyboard, parse_mode="HTML")
+            return
 
         if prefix == "quote":
             if selected == "refresh":
@@ -1431,8 +1712,15 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
                     quote_response = None
 
             details = _selected_quote_text(candidate, quote_response)
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Back to search", callback_data="quote:refresh")]])
-            await query.edit_message_text(details, reply_markup=keyboard, parse_mode="HTML")
+            preview, keyboard = _prepare_detail_view(
+                context,
+                prefix="quote",
+                identifier=_first_string(candidate.get("market_id"), candidate.get("event_id"), default=str(index)),
+                full_text=details,
+                back_callback="quote:refresh",
+                back_label="Back to search",
+            )
+            await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
             return
 
         if selected == "refresh":
@@ -1478,8 +1766,15 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             context.user_data["active_market_candidate"] = None
 
         details = _event_details_text(event, heading="Watching")
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Refresh list", callback_data="watch:refresh")]])
-        await query.edit_message_text(details, reply_markup=keyboard, parse_mode="HTML")
+        preview, keyboard = _prepare_detail_view(
+            context,
+            prefix="watch",
+            identifier=_first_string(event.get("id"), event.get("eventId"), default=selected),
+            full_text=details,
+            back_callback="watch:refresh",
+            back_label="Refresh list",
+        )
+        await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
         direction = _event_direction(event)
         if direction:
             await send_scenario_sticker(query.message, direction)

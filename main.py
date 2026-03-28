@@ -11,14 +11,18 @@ from urllib import error, request
 from medes_et_bayse import (
     BayseClient,
     build_balance_command,
+    build_fund_command,
     build_help_command,
     build_portfolio_command,
+    build_withdraw_command,
+    fund_handler_factory,
     natural_language_handler_factory,
     order_handler_factory,
     quote_handler_factory,
     runtime_config,
     watchlist_callback_handler_factory,
     watchlist_handler_factory,
+    withdraw_handler_factory,
 )
 
 try:
@@ -31,6 +35,8 @@ COMMANDS = [
     {"command": "order", "description": "Place a trade order"},
     {"command": "balance", "description": "Check your wallet balance"},
     {"command": "portfolio", "description": "View open positions"},
+    {"command": "fund", "description": "Show funding options"},
+    {"command": "withdraw", "description": "Show withdrawal options"},
     {"command": "events", "description": "List active markets"},
     {"command": "help", "description": "Show bot usage info"},
 ]
@@ -118,6 +124,8 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("quote", quote_handler_factory(client)))
     application.add_handler(CommandHandler("order", order_handler_factory(client)))
+    application.add_handler(CommandHandler("fund", fund_handler_factory()))
+    application.add_handler(CommandHandler("withdraw", withdraw_handler_factory()))
     application.add_handler(CommandHandler("events", watchlist_handler_factory(client)))
     application.add_handler(CommandHandler("balance", balance_handler))
     application.add_handler(CommandHandler("portfolio", portfolio_handler))

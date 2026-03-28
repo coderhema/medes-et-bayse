@@ -345,6 +345,85 @@ def _general_plain_text_response(text: str) -> CommandResult:
     return CommandResult(True, "I can help with quotes, watchlists, balances, orders, and portfolio checks. Try /help.")
 
 
+def _funding_asset_from_text(text: str) -> Optional[str]:
+    normalized = _normalize_text(text).lower()
+    if any(keyword in normalized for keyword in ("ngn", "naira", "cash", "local currency", "wallet")):
+        return "NGN"
+    if any(keyword in normalized for keyword in ("usd", "usdt", "crypto", "stablecoin", "be p20", "bep20", "crypto wallet")):
+        return "USDT"
+    return None
+
+
+def _withdraw_asset_from_text(text: str) -> Optional[str]:
+    normalized = _normalize_text(text).lower()
+    if any(keyword in normalized for keyword in ("ngn", "naira", "bank", "cash")):
+        return "NGN"
+    if any(keyword in normalized for keyword in ("usd", "usdt", "crypto", "wallet", "stablecoin")):
+        return "USDT"
+    return None
+
+
+def _fund_text(asset: Optional[str] = None) -> str:
+    lines = ["<b>Funding options</b>"]
+    if asset in {None, "NGN"}:
+        lines.extend([
+            "<b>NGN wallet</b>",
+            "Minimum deposit: <code>₦200</code>",
+            "Fee: <code>1%</code> deposit fee, minimum <code>₦5</code>, capped at <code>₦1,000</code>",
+            "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>Naira</b>, then follow the prompt to generate a unique virtual bank account.",
+            "Security: the deposit account is one-time use. Use the name that matches your verified account and check transaction history if the transfer is delayed.",
+        ])
+    if asset in {None, "USDT"}:
+        if asset is None:
+            lines.append("")
+        lines.extend([
+            "<b>USDT wallet</b>",
+            "Minimum deposit: <code>$1</code>",
+            "Network: <code>BEP20</code> only",
+            "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>USDT</b>, then copy the wallet address or use the QR code.",
+            "Security: use the BEP20 network only. Sending on the wrong network may result in lost funds.",
+        ])
+    lines.append("If you want, I can show the matching withdrawal flow too.")
+    return "\n".join(lines)
+
+
+def _withdraw_text(asset: Optional[str] = None) -> str:
+    lines = ["<b>Withdrawal options</b>"]
+    if asset in {None, "NGN"}:
+        lines.extend([
+            "<b>NGN withdrawal</b>",
+            "Minimum withdrawal: <code>₦500</code>",
+            "Fee: flat <code>₦20</code>",
+            "Flow: open <b>Wallet</b>, tap <b>Withdraw</b>, then enter your bank account details.",
+            "Security: withdrawals must go to a bank account that matches your verified Bayse name. KYC is required.",
+        ])
+    if asset in {None, "USDT"}:
+        if asset is None:
+            lines.append("")
+        lines.extend([
+            "<b>USDT withdrawal</b>",
+            "Minimum withdrawal: <code>$1</code>",
+            "Flow: open <b>Wallet</b>, tap <b>Withdraw</b>, then enter your crypto wallet address.",
+            "Security: confirm the address and network carefully. Network fees may apply.",
+        ])
+    lines.append("Withdrawals usually process instantly or within a few hours, depending on the route and verification status.")
+    return "\n".join(lines)
+
+
+def build_fund_command(text: str = "") -> CommandResult:
+    asset = _funding_asset_from_text(text)
+    if asset is None and _normalize_text(text):
+        return CommandResult(False, "Usage: /fund [NGN|USDT]")
+    return CommandResult(True, _fund_text(asset))
+
+
+def build_withdraw_command(text: str = "") -> CommandResult:
+    asset = _withdraw_asset_from_text(text)
+    if asset is None and _normalize_text(text):
+        return CommandResult(False, "Usage: /withdraw [NGN|USDT]")
+    return CommandResult(True, _withdraw_text(asset))
+
+
 def build_quote_command(client: BayseClient, text: str) -> CommandResult:
     args = _split_args(text)
     if not args:
@@ -504,6 +583,8 @@ def build_help_command() -> CommandResult:
             "/order <code>event name</code> <code>market name</code> <code>outcome</code> <code>buy|sell</code> <code>amount</code> <code>currency</code> [price] [LIMIT|MARKET] - Place a trade order",
             "/balance - Check your wallet balance",
             "/portfolio - View open positions",
+            "/fund - Show funding options for NGN and USDT",
+            "/withdraw - Show withdrawal options for NGN and USDT",
             "/events - List active markets",
             "/help - Show bot usage info",
             GENERAL_QUANT_GUIDANCE.capitalize(),
@@ -563,6 +644,16 @@ def _looks_like_help_intent(text: str) -> bool:
     return any(keyword in normalized for keyword in ("help", "how do i use", "usage", "commands"))
 
 
+def _looks_like_fund_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("fund", "deposit", "add cash", "cash in", "top up", "topup"))
+
+
+def _looks_like_withdraw_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("withdraw", "cash out", "payout", "send out", "remove funds"))
+
+
 def _looks_like_quote_intent(text: str) -> bool:
     normalized = _normalize_text(text).lower()
     return any(keyword in normalized for keyword in ("quote", "price", "ticker"))
@@ -577,6 +668,10 @@ def build_natural_language_command(client: BayseClient, text: str) -> CommandRes
         return build_balance_command(client)
     if _looks_like_portfolio_intent(text):
         return build_portfolio_command(client)
+    if _looks_like_fund_intent(text):
+        return build_fund_command(text)
+    if _looks_like_withdraw_intent(text):
+        return build_withdraw_command(text)
     if _looks_like_help_intent(text):
         return build_help_command()
     if _looks_like_quote_intent(text):
@@ -653,6 +748,30 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
             await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
             return
         print(json.dumps({"telegram": "text_routed", "route": "general", "text": text}, ensure_ascii=False), flush=True)
+        await message.reply_text(result.text, parse_mode="HTML")
+
+    return handler
+
+
+def fund_handler_factory() -> Callable[[Any, Any], Any]:
+    async def handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        text = getattr(message, "text", "") or ""
+        result = build_fund_command(text)
+        await message.reply_text(result.text, parse_mode="HTML")
+
+    return handler
+
+
+def withdraw_handler_factory() -> Callable[[Any, Any], Any]:
+    async def handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        text = getattr(message, "text", "") or ""
+        result = build_withdraw_command(text)
         await message.reply_text(result.text, parse_mode="HTML")
 
     return handler

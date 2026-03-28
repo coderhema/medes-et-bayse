@@ -185,7 +185,18 @@ class TelegramHandler:
         data = getattr(context, "user_data", None)
         if not isinstance(data, dict):
             return
-        data["active_trade_context"] = {"event_id": event_id, "market_id": market_id, "outcome_id": outcome_id, "currency": currency, "side": side.upper()}
+        ctx = {
+            "event_id": event_id,
+            "market_id": market_id,
+            "outcome_id": outcome_id,
+            "currency": currency,
+            "side": side.upper(),
+        }
+        ctx["eventId"] = event_id
+        ctx["marketId"] = market_id
+        ctx["outcomeId"] = outcome_id
+        ctx["normalizedCurrency"] = currency
+        data["active_trade_context"] = ctx
 
     def _active_context(self, context: Any) -> dict[str, Any]:
         data = getattr(context, "user_data", None)
@@ -193,6 +204,41 @@ class TelegramHandler:
             return {}
         value = data.get("active_trade_context")
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _sync_trade_context_aliases(ctx: dict[str, Any]) -> None:
+        """Keep snake_case and camelCase identifiers aligned for all state machine hops."""
+        alias_map = {
+            "event_id": "eventId",
+            "market_id": "marketId",
+            "outcome_id": "outcomeId",
+            "currency": "normalizedCurrency",
+            "side": "tradeSide",
+        }
+        for snake_key, camel_key in alias_map.items():
+            value = ctx.get(snake_key)
+            if value not in (None, ""):
+                ctx[camel_key] = value
+        if ctx.get("eventId") not in (None, "") and not ctx.get("event_id"):
+            ctx["event_id"] = ctx["eventId"]
+        if ctx.get("marketId") not in (None, "") and not ctx.get("market_id"):
+            ctx["market_id"] = ctx["marketId"]
+        if ctx.get("outcomeId") not in (None, "") and not ctx.get("outcome_id"):
+            ctx["outcome_id"] = ctx["outcomeId"]
+        if ctx.get("normalizedCurrency") not in (None, "") and not ctx.get("currency"):
+            ctx["currency"] = ctx["normalizedCurrency"]
+        if ctx.get("tradeSide") not in (None, "") and not ctx.get("side"):
+            ctx["side"] = ctx["tradeSide"]
+
+    def _normalize_trade_context(self, context: Any) -> dict[str, Any]:
+        ctx = dict(self._active_context(context))
+        if not ctx:
+            return {}
+        self._sync_trade_context_aliases(ctx)
+        data = getattr(context, "user_data", None)
+        if isinstance(data, dict):
+            data["active_trade_context"] = ctx
+        return ctx
 
     def _update_active_context(self, context: Any, **kwargs: Any) -> None:
         """Update individual fields of the active trade context without replacing the whole dict."""
@@ -204,6 +250,7 @@ class TelegramHandler:
             ctx = {}
             data["active_trade_context"] = ctx
         ctx.update(kwargs)
+        self._sync_trade_context_aliases(ctx)
 
     @staticmethod
     def _event_markets(event: dict) -> list[dict]:
@@ -564,7 +611,7 @@ class TelegramHandler:
                 await message.reply_text("Please enter a numeric amount, e.g. 500", parse_mode="HTML")
                 return
             amount = float(amount_match.group(1))
-            active = self._active_context(context)
+            active = self._normalize_trade_context(context)
             if not all(active.get(k) for k in ("event_id", "market_id", "outcome_id", "currency")):
                 if isinstance(ud, dict):
                     ud.pop("pending_action", None)
@@ -663,7 +710,7 @@ class TelegramHandler:
                 market_id = market.get("id", "")
                 market_title = market.get("title") or market.get("name") or market_id
                 if market_id:
-                    keyboard_rows.append([InlineKeyboardButton(market_title, callback_data=f"market:{market_id}")])
+                    keyboard_rows.append([InlineKeyboardButton(market_title, callback_data=f"market:{event_id}:{market_id}")])
             keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
             await query.edit_message_text(
                 f"<b>{title}</b>\nSelect a market:",
@@ -673,17 +720,27 @@ class TelegramHandler:
         except Exception as e:
             await query.edit_message_text(f"Error fetching event: {e}", parse_mode="HTML")
 
-    async def _cb_market(self, query: Any, context: ContextTypes.DEFAULT_TYPE, market_id: str) -> None:
+    async def _cb_market(self, query: Any, context: ContextTypes.DEFAULT_TYPE, market_id: str, event_id: str = "") -> None:
         """Handle user tapping a market button — show all outcomes as buttons."""
+        if event_id:
+            self._update_active_context(context, event_id=event_id)
         self._update_active_context(context, market_id=market_id)
         market: Optional[dict] = None
-        for ev in self._get_event_cache(context).values():
-            for m in self._event_markets(ev):
+        event_cache = self._get_event_cache(context)
+        if event_id and event_id in event_cache:
+            for m in self._event_markets(event_cache[event_id]):
                 if m.get("id") == market_id:
                     market = m
                     break
-            if market:
-                break
+        if market is None:
+            for ev in event_cache.values():
+                for m in self._event_markets(ev):
+                    if m.get("id") == market_id:
+                        market = m
+                        event_id = event_id or ev.get("id", "")
+                        break
+                if market:
+                    break
         if market is None:
             await query.edit_message_text(
                 "Market data not found. Please use /events to start fresh.", parse_mode="HTML"
@@ -701,7 +758,7 @@ class TelegramHandler:
                 outcome.get("title") or outcome.get("name") or outcome.get("label") or outcome_id
             )
             if outcome_id:
-                keyboard_rows.append([InlineKeyboardButton(outcome_title, callback_data=f"outcome:{outcome_id}")])
+                keyboard_rows.append([InlineKeyboardButton(outcome_title, callback_data=f"outcome:{event_id}:{market_id}:{outcome_id}")])
         keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
         await query.edit_message_text(
             f"<b>{market_title}</b>\nSelect an outcome:",
@@ -709,12 +766,16 @@ class TelegramHandler:
             parse_mode="HTML",
         )
 
-    async def _cb_outcome(self, query: Any, context: ContextTypes.DEFAULT_TYPE, outcome_id: str) -> None:
+    async def _cb_outcome(self, query: Any, context: ContextTypes.DEFAULT_TYPE, outcome_id: str, event_id: str = "", market_id: str = "") -> None:
         """Handle user tapping an outcome button — show currency selection."""
+        if event_id:
+            self._update_active_context(context, event_id=event_id)
+        if market_id:
+            self._update_active_context(context, market_id=market_id)
         self._update_active_context(context, outcome_id=outcome_id, side="BUY")
         outcome_title: Optional[str] = None
-        active = self._active_context(context)
-        market_id = active.get("market_id")
+        active = self._normalize_trade_context(context)
+        market_id = market_id or active.get("market_id")
         for ev in self._get_event_cache(context).values():
             for m in self._event_markets(ev):
                 if m.get("id") == market_id:
@@ -727,8 +788,8 @@ class TelegramHandler:
                 break
         label = outcome_title or outcome_id
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("NGN", callback_data="currency:NGN"),
-            InlineKeyboardButton("USD", callback_data="currency:USD"),
+            InlineKeyboardButton("NGN", callback_data=f"currency:{event_id}:{market_id}:{outcome_id}:NGN"),
+            InlineKeyboardButton("USD", callback_data=f"currency:{event_id}:{market_id}:{outcome_id}:USD"),
         ]])
         await query.edit_message_text(
             f"Outcome: <b>{label}</b>\nSelect currency:",
@@ -736,9 +797,15 @@ class TelegramHandler:
             parse_mode="HTML",
         )
 
-    async def _cb_currency(self, query: Any, context: ContextTypes.DEFAULT_TYPE, currency: str) -> None:
+    async def _cb_currency(self, query: Any, context: ContextTypes.DEFAULT_TYPE, currency: str, event_id: str = "", market_id: str = "", outcome_id: str = "") -> None:
         """Handle currency selection — prompt for amount."""
         currency = currency.upper()
+        if event_id:
+            self._update_active_context(context, event_id=event_id)
+        if market_id:
+            self._update_active_context(context, market_id=market_id)
+        if outcome_id:
+            self._update_active_context(context, outcome_id=outcome_id)
         self._update_active_context(context, currency=currency)
         ud = getattr(context, "user_data", {})
         if isinstance(ud, dict):
@@ -778,11 +845,26 @@ class TelegramHandler:
         elif data.startswith("event:"):
             await self._cb_event(query, context, data[len("event:"):])
         elif data.startswith("market:"):
-            await self._cb_market(query, context, data[len("market:"):])
+            payload = data[len("market:"):]
+            parts = payload.split(":")
+            if len(parts) >= 2:
+                await self._cb_market(query, context, parts[-1], event_id=parts[0])
+            else:
+                await self._cb_market(query, context, payload)
         elif data.startswith("outcome:"):
-            await self._cb_outcome(query, context, data[len("outcome:"):])
+            payload = data[len("outcome:"):]
+            parts = payload.split(":")
+            if len(parts) >= 3:
+                await self._cb_outcome(query, context, parts[-1], event_id=parts[0], market_id=parts[1])
+            else:
+                await self._cb_outcome(query, context, payload)
         elif data.startswith("currency:"):
-            await self._cb_currency(query, context, data[len("currency:"):])
+            payload = data[len("currency:"):]
+            parts = payload.split(":")
+            if len(parts) >= 4:
+                await self._cb_currency(query, context, parts[-1], event_id=parts[0], market_id=parts[1], outcome_id=parts[2])
+            else:
+                await self._cb_currency(query, context, payload)
         elif data.startswith("portfolio:"):
             await self._cb_portfolio(query, context, data[len("portfolio:"):])
 

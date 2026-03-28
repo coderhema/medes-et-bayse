@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib import error, request
 
@@ -83,6 +84,31 @@ def build_application() -> Application:
     return application
 
 
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path in {"/", "/health", "/healthz"}:
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        return
+
+
+def _start_http_server() -> ThreadingHTTPServer:
+    port = int(os.getenv("PORT", "8080"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(json.dumps({"http": "listening", "port": port}, ensure_ascii=False))
+    return server
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not token:
@@ -92,6 +118,7 @@ def main() -> None:
     result = set_my_commands(token)
     print(json.dumps({"startup": "ok", "setMyCommands": result.get("ok", False), "pokeApiKeyConfigured": bool(runtime_config.poke_api_key)}, ensure_ascii=False))
 
+    _start_http_server()
     application = build_application()
     print(json.dumps({"polling": "starting"}, ensure_ascii=False))
     application.run_polling(drop_pending_updates=True)

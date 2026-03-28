@@ -295,7 +295,7 @@ def _extract_collection(payload: Any) -> list[dict[str, Any]]:
 
 KNOWN_EVENT_CATEGORIES = {"sports", "crypto", "politics", "economy", "entertainment", "culture", "technology", "business", "music", "world"}
 QUOTE_STOP_WORDS = {"quote", "price", "prices", "ticker", "market", "markets", "the", "a", "an", "for", "of", "on", "about"}
-WATCH_STOP_WORDS = {"watch", "watchlist", "events", "event", "markets", "market", "monitor", "track", "follow", "list", "show", "active", "my"}
+WATCH_STOP_WORDS = {"watch", "watchlist", "events", "event", "markets", "market", "monitor", "track", "follow", "list", "show", "active", "my", "me"}
 
 
 def _is_uuid_like(value: Any) -> bool:
@@ -641,6 +641,13 @@ def _trade_currency_keyboard() -> Any:
     ])
 
 
+def _trade_currency_prompt_text(candidate: dict[str, Any]) -> str:
+    return chr(10).join([
+        f"Active market: {_safe_html(candidate.get('event_title') or '')} · {_safe_html(candidate.get('market_title') or '')}",
+        "Choose a currency to continue.",
+    ])
+
+
 def _trade_view_bucket(context: Any) -> dict[str, dict[str, Any]]:
     if context is None:
         return {}
@@ -920,6 +927,7 @@ def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str,
         },
     }
 
+    local = _local_parse_trade_intent(text, candidate)
     brain_url = os.getenv("POKE_BRAIN_URL", "").strip() or os.getenv("POKE_API_BRAIN_URL", "").strip()
     poke_api_key = os.getenv("POKE_API_KEY", "").strip()
     if brain_url:
@@ -934,17 +942,28 @@ def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str,
             if payload:
                 parsed = json.loads(payload)
                 if isinstance(parsed, dict):
-                    return parsed.get("result") if isinstance(parsed.get("result"), dict) else parsed
+                    result = parsed.get("result") if isinstance(parsed.get("result"), dict) else parsed
+                    if isinstance(result, dict):
+                        merged = dict(local)
+                        for key, value in result.items():
+                            if value is None:
+                                continue
+                            if isinstance(value, str) and not value.strip():
+                                continue
+                            merged[key] = value
+                        return merged if merged else local
         except Exception:
             pass
 
+    return local
+
+
+def _local_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_text(text).lower()
     side_match = SMART_TRADE_SIDE_PATTERN.search(normalized)
     amount_match = SMART_TRADE_AMOUNT_PATTERN.search(normalized)
     currency_match = SMART_TRADE_CURRENCY_PATTERN.search(normalized)
     outcome_match = SMART_TRADE_OUTCOME_PATTERN.search(normalized)
-    if not side_match and not amount_match and not currency_match and not outcome_match:
-        return {}
 
     side = side_match.group(1).lower() if side_match else ""
     if side == "long":
@@ -1851,10 +1870,10 @@ def build_natural_language_command(client: BayseClient, text: str, context: Any 
     smart_trade = build_smart_trade_command(client, text, context=context)
     if smart_trade is not None:
         return smart_trade
-    if _looks_like_order_intent(text):
-        return build_order_command(client, text, context=context)
     if _looks_like_events_intent(text):
         return build_events_command(client, text)
+    if _looks_like_order_intent(text):
+        return build_order_command(client, text, context=context)
     if _looks_like_watch_intent(text):
         return build_watchlist_command(client, text)
     if _looks_like_balance_intent(text):
@@ -1929,6 +1948,13 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
             result = build_natural_language_command(client, text, context=context)
         if not result.ok:
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
+            if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency":
+                candidate = _active_market_candidate(context) or {}
+                reply_text = result.text
+                if isinstance(candidate, dict) and candidate:
+                    reply_text = _trade_currency_prompt_text(candidate)
+                await message.reply_text(reply_text, reply_markup=_trade_currency_keyboard(), parse_mode="HTML")
+                return
             await message.reply_text(result.text, parse_mode="HTML")
             return
         if result.raw and isinstance(result.raw, dict) and result.raw.get("quote_candidates"):
@@ -2041,6 +2067,9 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             result = build_order_command(client, text, context=context)
             if _should_suppress_debug_message(result.text):
                 return
+            if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency":
+                await message.reply_text(_trade_currency_prompt_text(active_candidate), reply_markup=_trade_currency_keyboard(), parse_mode="HTML")
+                return
             await message.reply_text(result.text, parse_mode="HTML")
             scenario = _order_scenario_from_result(result)
             if scenario:
@@ -2053,6 +2082,9 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             return
         result = build_order_command(client, text, context=context)
         if _should_suppress_debug_message(result.text):
+            return
+        if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency" and active_candidate:
+            await message.reply_text(_trade_currency_prompt_text(active_candidate), reply_markup=_trade_currency_keyboard(), parse_mode="HTML")
             return
         await message.reply_text(result.text, parse_mode="HTML")
         scenario = _order_scenario_from_result(result)

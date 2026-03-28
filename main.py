@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
-from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any
 from urllib import error, request
 
 from medes_et_bayse import (
@@ -15,8 +15,13 @@ from medes_et_bayse import (
     quote_handler_factory,
     watchlist_callback_handler_factory,
     watchlist_handler_factory,
+    runtime_config,
 )
-from medes_et_bayse.config import runtime_config
+
+try:
+    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+except Exception as exc:  # pragma: no cover
+    raise RuntimeError(f"python-telegram-bot is required to run this bot: {exc}") from exc
 
 COMMANDS = [
     {"command": "quote", "description": "Get a market quote"},
@@ -28,25 +33,12 @@ COMMANDS = [
 ]
 
 
-@dataclass(frozen=True)
-class BotRuntimeConfig:
-    telegram_bot_token: Optional[str]
-    poke_api_key: Optional[str]
-
-
-def load_bot_runtime_config() -> BotRuntimeConfig:
-    return BotRuntimeConfig(
-        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN"),
-        poke_api_key=runtime_config.poke_api_key,
-    )
-
-
 def _bot_api_url(token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
 
 
-def set_my_commands(token: str, commands: Iterable[dict[str, str]]) -> dict[str, Any]:
-    payload = json.dumps({"commands": list(commands)}).encode("utf-8")
+def set_my_commands(token: str) -> dict[str, Any]:
+    payload = json.dumps({"commands": COMMANDS}).encode("utf-8")
     req = request.Request(
         _bot_api_url(token, "setMyCommands"),
         data=payload,
@@ -57,24 +49,24 @@ def set_my_commands(token: str, commands: Iterable[dict[str, str]]) -> dict[str,
         with request.urlopen(req, timeout=30) as resp:
             body = resp.read().decode("utf-8")
             return json.loads(body) if body else {"ok": True}
-    except error.HTTPError as exc:
+    except error.HTTPError as exc:  # pragma: no cover
         body = exc.read().decode("utf-8") if exc.fp else exc.reason
         raise RuntimeError(f"Telegram API error ({exc.code}): {body}") from exc
 
 
-def build_application() -> Any:
-    try:
-        from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
-    except Exception:
-        return None
-
-    config = load_bot_runtime_config()
-    if not config.telegram_bot_token:
+def build_application() -> Application:
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+    if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
-    client = BayseClient(api_key=runtime_config.public_key, api_secret=runtime_config.secret_key, base_url=runtime_config.base_url)
-    application = Application.builder().token(config.telegram_bot_token).build()
-    application.bot_data["poke_api_key"] = config.poke_api_key
+    client = BayseClient(
+        api_key=runtime_config.public_key,
+        api_secret=runtime_config.secret_key,
+        base_url=runtime_config.base_url,
+    )
+
+    application = Application.builder().token(token).build()
+    application.bot_data["poke_api_key"] = runtime_config.poke_api_key
 
     async def help_handler(update: Any, context: Any) -> None:
         message = getattr(update, "effective_message", None) or getattr(update, "message", None)
@@ -91,16 +83,19 @@ def build_application() -> Any:
     return application
 
 
-def main() -> int:
-    config = load_bot_runtime_config()
-    if not config.telegram_bot_token:
+def main() -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+    if not token:
         print("TELEGRAM_BOT_TOKEN is missing", file=sys.stderr)
-        return 2
+        raise SystemExit(2)
 
-    result = set_my_commands(config.telegram_bot_token, COMMANDS)
-    print(json.dumps(result, ensure_ascii=False))
-    return 0 if result.get("ok") else 1
+    result = set_my_commands(token)
+    print(json.dumps({"startup": "ok", "setMyCommands": result.get("ok", False), "pokeApiKeyConfigured": bool(runtime_config.poke_api_key)}, ensure_ascii=False))
+
+    application = build_application()
+    print(json.dumps({"polling": "starting"}, ensure_ascii=False))
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

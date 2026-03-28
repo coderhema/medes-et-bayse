@@ -1274,8 +1274,16 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     outcome_text = ""
     outcome_id = ""
 
-    event_id = _first_string(active_candidate.get("event_id") if use_active_context else None, default="")
-    market_id = _first_string(active_candidate.get("market_id") if use_active_context else None, default="")
+    event_id = _first_string(
+        active_candidate.get("event_id") if use_active_context else None,
+        active_candidate.get("eventId") if use_active_context else None,
+        default="",
+    )
+    market_id = _first_string(
+        active_candidate.get("market_id") if use_active_context else None,
+        active_candidate.get("marketId") if use_active_context else None,
+        default="",
+    )
     side = _normalize_text((order_state or {}).get("side") or (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
     if side == "long":
         side = "buy"
@@ -1578,17 +1586,43 @@ def _portfolio_collection(payload: Any, keys: tuple[str, ...]) -> list[dict[str,
 
 def _portfolio_balance_value(payload: Any) -> str:
     data = _portfolio_mapping(payload)
+    balance_keys = (
+        "balance",
+        "walletBalance",
+        "availableBalance",
+        "cashBalance",
+        "cash",
+        "available",
+        "available_cash",
+        "totalBalance",
+        "settledBalance",
+        "equity",
+        "ngnBalance",
+        "primaryBalance",
+        "primary_balance",
+    )
+    preferred_asset_keys = (
+        ("balances", "NGN", "availableBalance"),
+        ("balances", "NGN", "balance"),
+        ("balances", "ngn", "availableBalance"),
+        ("balances", "ngn", "balance"),
+        ("wallet", "balances", "NGN", "availableBalance"),
+        ("wallet", "balances", "NGN", "balance"),
+        ("wallet", "balances", "ngn", "availableBalance"),
+        ("wallet", "balances", "ngn", "balance"),
+        ("balances", "cash", "NGN"),
+        ("balances", "available", "NGN"),
+        ("funds", "available", "NGN"),
+    )
+    for path in preferred_asset_keys:
+        value = _mapping_value(data, *path)
+        if value is not None and _normalize_text(value):
+            return _format_number(value)
+    for key in balance_keys:
+        value = data.get(key)
+        if value is not None and _normalize_text(value):
+            return _format_number(value)
     for path in (
-        ("balance",),
-        ("walletBalance",),
-        ("availableBalance",),
-        ("cashBalance",),
-        ("cash",),
-        ("available",),
-        ("available_cash",),
-        ("totalBalance",),
-        ("settledBalance",),
-        ("equity",),
         ("wallet", "balance"),
         ("wallet", "availableBalance"),
         ("wallet", "cashBalance"),

@@ -1,14 +1,13 @@
-"""medes-et-bayse: Main entry point for the Bayse Markets trading bot.
-
-Uses Poke API as the backend orchestration layer.
-Strategies: Kelly Criterion, Arbitrage Detection, Market Making.
-"""
+"""medes-et-bayse: Main entry point for the Bayse Markets trading bot."""
 
 from __future__ import annotations
 
 import argparse
 import os
+import threading
 import time
+from datetime import datetime, timezone
+from typing import Optional
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -36,8 +35,18 @@ def _env(*names: str, default: str = "") -> str:
     return default
 
 
-def _resolve_trade_args(signal: dict) -> tuple[str, str, float]:
-    side = str(signal.get("side", "")).lower()
+def _parse_timestamp(value: str) -> datetime:
+    if not value:
+        return datetime.now(timezone.utc)
+    cleaned = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return datetime.now(timezone.utc)
+
+
+def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
+    side = str(signal.get("side", "")).upper()
     market_id = str(
         signal.get("market_id")
         or signal.get("marketId")
@@ -46,10 +55,11 @@ def _resolve_trade_args(signal: dict) -> tuple[str, str, float]:
         or ""
     ).strip()
     outcome_id = str(signal.get("outcome_id") or signal.get("outcomeId") or side).strip()
+    event_id = str(signal.get("event_id") or signal.get("eventId") or market_id).strip()
 
-    if side == "yes":
+    if side == "YES":
         price = signal.get("yes_price") or signal.get("market_prob") or signal.get("price")
-    elif side == "no":
+    elif side == "NO":
         price = signal.get("no_price") or signal.get("market_prob") or signal.get("price")
     else:
         price = signal.get("price") or signal.get("market_prob")
@@ -57,7 +67,41 @@ def _resolve_trade_args(signal: dict) -> tuple[str, str, float]:
     if price is None:
         price = 0.0
 
-    return market_id, outcome_id, float(price)
+    currency = _env("BAYSE_CURRENCY", default="USD")
+    return event_id, market_id, outcome_id, currency, float(price)
+
+
+def _format_trade_alert(trade: dict) -> str:
+    timestamp = trade.get("timestamp", "")
+    market_id = trade.get("marketId", "unknown")
+    outcome = trade.get("outcome", "unknown")
+    side = trade.get("side", "unknown")
+    price = trade.get("price", 0)
+    quantity = trade.get("quantity", 0)
+    return (
+        f"New Bayse trade detected\n"
+        f"Market: {market_id}\n"
+        f"Outcome: {outcome}\n"
+        f"Side: {side}\n"
+        f"Price: {float(price):.4f}\n"
+        f"Quantity: {float(quantity):.2f}\n"
+        f"Time: {timestamp}"
+    )
+
+
+def _format_event_alert(event: dict) -> str:
+    return (
+        f"New active market detected\n"
+        f"Title: {event.get('title') or event.get('name') or 'Untitled market'}\n"
+        f"Event ID: {event.get('id', 'unknown')}"
+    )
+
+
+def _notify(poke: PokeClient, message: str, payload: Optional[dict] = None, level: str = "info") -> None:
+    try:
+        poke.notify(message, payload=payload, level=level)
+    except Exception as exc:
+        logger.error(f"Notification failed: {exc}")
 
 
 def run_cycle(
@@ -67,14 +111,12 @@ def run_cycle(
     dry_run: bool = True,
     bayse_user_id: str = "",
 ) -> None:
-    """Execute one full scan-and-trade cycle."""
     logger.info("Starting trading cycle...")
 
     events = client.get_open_events(page=1, size=50)
     logger.info(f"Fetched {len(events)} open markets")
 
     all_signals = []
-
     for strategy in strategies:
         signals = strategy.scan(events)
         if signals:
@@ -82,24 +124,16 @@ def run_cycle(
             all_signals.extend(signals)
 
     if not all_signals:
-        logger.info("No actionable signals this cycle.")
-        poke.notify(
-            "medes-et-bayse: No signals this cycle.",
-            payload={"user_id": bayse_user_id, "signals": []},
-            level="info",
-        )
+        logger.debug("No actionable signals this cycle.")
         return
 
     executed = []
     for signal in all_signals:
         logger.info(
-            f"Signal: {signal['event_title']} | "
-            f"Side: {signal['side']} | "
-            f"Edge: {signal['edge']:.2%} | "
-            f"Stake: ${signal['stake']:.2f} USDC"
+            f"Signal: {signal['event_title']} | Side: {signal['side']} | Edge: {signal['edge']:.2%} | Stake: ${signal['stake']:.2f} USDC"
         )
         if not dry_run:
-            market_id, outcome_id, price = _resolve_trade_args(signal)
+            event_id, market_id, outcome_id, currency, price = _resolve_trade_args(signal)
             if not market_id or not outcome_id:
                 logger.warning(
                     f"Skipping live trade for {signal.get('event_title', 'unknown event')} because market/outcome identifiers are missing."
@@ -108,13 +142,15 @@ def run_cycle(
                 continue
 
             result = client.place_order(
-                event_id=str(signal["event_id"]),
+                event_id=event_id,
                 market_id=market_id,
+                side=str(signal["side"]),
                 outcome_id=outcome_id,
-                side=str(signal["side"]).upper(),
                 price=price,
                 amount=float(signal["stake"]),
-                currency=_env("BAYSE_CURRENCY", default="USDC"),
+                currency=currency,
+                order_type="LIMIT" if price else "MARKET",
+                time_in_force="GTC" if price else None,
             )
             signal["trade_result"] = result
             executed.append(signal)
@@ -122,7 +158,8 @@ def run_cycle(
             logger.info("[DRY RUN] Trade not placed.")
             executed.append({**signal, "dry_run": True})
 
-    poke.notify(
+    _notify(
+        poke,
         f"medes-et-bayse: Cycle complete. {len(executed)} trade(s) {'simulated' if dry_run else 'executed'}.",
         payload={"user_id": bayse_user_id, "trades": executed},
         level="success",
@@ -130,29 +167,68 @@ def run_cycle(
     logger.info("Cycle complete.")
 
 
+def monitor_bayse_activity(
+    client: BayseClient,
+    poke: PokeClient,
+    poll_interval: int,
+    stop_event: threading.Event,
+) -> None:
+    seen_trade_ids: set[str] = set()
+    seen_event_ids: set[str] = set()
+
+    try:
+        for trade in client.get_trades(limit=100):
+            trade_id = str(trade.get("id", "")).strip()
+            if trade_id:
+                seen_trade_ids.add(trade_id)
+        for event in client.get_open_events(page=1, size=100):
+            event_id = str(event.get("id", "")).strip()
+            if event_id:
+                seen_event_ids.add(event_id)
+    except Exception as exc:
+        logger.warning(f"Initial Bayse activity snapshot failed: {exc}")
+
+    logger.info(f"Started Bayse activity polling every {poll_interval}s")
+
+    while not stop_event.is_set():
+        try:
+            trades = client.get_trades(limit=50)
+            new_trades = []
+            for trade in sorted(trades, key=lambda item: _parse_timestamp(str(item.get("timestamp", "")))):
+                trade_id = str(trade.get("id", "")).strip()
+                if trade_id and trade_id not in seen_trade_ids:
+                    seen_trade_ids.add(trade_id)
+                    new_trades.append(trade)
+
+            for trade in new_trades:
+                _notify(poke, _format_trade_alert(trade), payload={"trade": trade}, level="info")
+
+            events = client.get_open_events(page=1, size=100)
+            new_events = []
+            for event in events:
+                event_id = str(event.get("id", "")).strip()
+                if event_id and event_id not in seen_event_ids:
+                    seen_event_ids.add(event_id)
+                    new_events.append(event)
+
+            for event in new_events:
+                _notify(poke, _format_event_alert(event), payload={"event": event}, level="info")
+        except Exception as exc:
+            logger.error(f"Bayse activity polling error: {exc}")
+        stop_event.wait(poll_interval)
+
+
 def main():
     parser = argparse.ArgumentParser(description="medes-et-bayse trading bot")
-    parser.add_argument(
-        "--scan-only",
-        action="store_true",
-        help="Scan markets and log signals without placing trades",
-    )
-    parser.add_argument(
-        "--strategy",
-        choices=["kelly", "arbitrage", "market-making", "all"],
-        default="all",
-        help="Strategy to run",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run one cycle and exit (useful for Poke Recipe cron)",
-    )
+    parser.add_argument("--scan-only", action="store_true", help="Scan markets and log signals without placing trades")
+    parser.add_argument("--strategy", choices=["kelly", "arbitrage", "market-making", "all"], default="all", help="Strategy to run")
+    parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
     args = parser.parse_args()
 
     dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
     bankroll = float(os.getenv("BANKROLL", "100.0"))
     poll_interval = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
+    trade_poll_interval = int(os.getenv("TRADE_POLL_INTERVAL_SECONDS", "30"))
 
     if args.scan_only:
         dry_run = True
@@ -169,18 +245,15 @@ def main():
     if not bayse_user_id:
         logger.warning("BAYSE_USER_ID is not set.")
 
-    telegram_handler = build_telegram_handler_from_env() if build_telegram_handler_from_env else None
+    client = BayseClient(public_key=bayse_public_key, secret_key=bayse_secret_key, base_url=bayse_base_url)
 
-    client = BayseClient(
-        public_key=bayse_public_key,
-        secret_key=bayse_secret_key,
-        base_url=bayse_base_url,
-    )
-    poke = PokeClient(
-        api_key=_env("POKE_API_KEY"),
-        webhook_url=_env("POKE_WEBHOOK_URL"),
-        telegram=telegram_handler,
-    )
+    telegram_handler = None
+    if build_telegram_handler_from_env:
+        telegram_handler = build_telegram_handler_from_env()
+        if telegram_handler:
+            telegram_handler.attach_bayse_client(client)
+
+    poke = PokeClient(api_key=_env("POKE_API_KEY"), webhook_url=_env("POKE_WEBHOOK_URL"), telegram=telegram_handler)
 
     min_edge = float(os.getenv("MIN_EDGE", "0.03"))
     max_position_fraction = float(os.getenv("MAX_POSITION_FRACTION", "0.05"))
@@ -198,17 +271,24 @@ def main():
 
     strategies = strategy_map[args.strategy]
 
-    if args.once or args.scan_only:
-        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
-    else:
+    if not args.once and not args.scan_only:
+        stop_event = threading.Event()
+        if telegram_handler:
+            telegram_handler.start_background_polling()
+        threading.Thread(target=monitor_bayse_activity, args=(client, poke, trade_poll_interval, stop_event), daemon=True).start()
         logger.info(f"Starting polling loop every {poll_interval}s...")
-        while True:
-            try:
-                run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
-            except Exception as e:
-                logger.error(f"Cycle error: {e}")
-                poke.notify(f"medes-et-bayse ERROR: {e}", level="error")
-            time.sleep(poll_interval)
+        try:
+            while True:
+                try:
+                    run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
+                except Exception as e:
+                    logger.error(f"Cycle error: {e}")
+                    _notify(poke, f"medes-et-bayse ERROR: {e}", level="error")
+                time.sleep(poll_interval)
+        except KeyboardInterrupt:
+            stop_event.set()
+    else:
+        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
 
 
 if __name__ == "__main__":

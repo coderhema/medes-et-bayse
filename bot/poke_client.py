@@ -24,13 +24,6 @@ class PokeClient:
         webhook_url: str,
         telegram: Optional["TelegramHandler"] = None,
     ):
-        """
-        Args:
-            api_key: Poke API key for Authorization header.
-            webhook_url: Poke webhook endpoint URL.
-            telegram: Optional TelegramHandler instance. When provided,
-                      every notify() call is also mirrored to Telegram.
-        """
         self.api_key = api_key
         self.webhook_url = webhook_url
         self.telegram = telegram
@@ -45,34 +38,14 @@ class PokeClient:
         payload: Optional[Any] = None,
         level: str = "info",
     ) -> bool:
-        """Send a notification/signal to the Poke webhook and (optionally) Telegram.
-
-        The Poke Recipe on the other end can:
-        - Text/notify the user
-        - Log results to Notion
-        - Trigger follow-up automations
-
-        When a TelegramHandler is attached, the same message is also sent
-        as a Telegram alert so the user gets real-time mobile notifications.
-
-        Args:
-            message: Human-readable summary.
-            payload: Optional structured data (trade signals, results).
-            level: 'info', 'success', 'error'
-
-        Returns:
-            True if at least the Poke webhook was reached successfully,
-            or if the webhook is not configured but Telegram was notified.
-        """
         poke_ok = self._send_to_poke(message, payload, level)
         telegram_ok = self._send_to_telegram(message, level)
-
         return poke_ok or telegram_ok
 
     def _send_to_poke(self, message: str, payload: Optional[Any], level: str) -> bool:
-        """Internal: POST to the Poke webhook."""
         if not self.webhook_url:
-            logger.warning("POKE_WEBHOOK_URL not set — skipping Poke notification")
+            if self.telegram is None:
+                logger.warning("POKE_WEBHOOK_URL not set — skipping Poke notification")
             return False
 
         body = {
@@ -92,17 +65,10 @@ class PokeClient:
             return False
 
     def _send_to_telegram(self, message: str, level: str) -> bool:
-        """Internal: mirror the notification to Telegram if a handler is configured."""
         if self.telegram is None:
             return False
-        return self.telegram.send_message_sync(
-            text=f"<b>medes-et-bayse</b> [{level}]\n{message}"
-        )
+        return self.telegram.send_message_sync(text=f"<b>medes-et-bayse</b> [{level}]\n{message}")
 
     def attach_telegram(self, telegram: "TelegramHandler") -> None:
-        """Attach (or replace) the TelegramHandler after construction.
-
-        Useful when the handler is created after PokeClient initialisation.
-        """
         self.telegram = telegram
         logger.info("TelegramHandler attached to PokeClient.")

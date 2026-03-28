@@ -18,8 +18,15 @@ from urllib import error, request
 from loguru import logger
 
 try:
-    from telegram import Update, Bot
-    from telegram.ext import Application, CommandHandler, ContextTypes
+    from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import (
+        Application,
+        CallbackQueryHandler,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        filters,
+    )
 except ImportError as exc:
     raise ImportError("python-telegram-bot is required. Install it with: pip install python-telegram-bot") from exc
 
@@ -186,6 +193,40 @@ class TelegramHandler:
             return {}
         value = data.get("active_trade_context")
         return value if isinstance(value, dict) else {}
+
+    def _update_active_context(self, context: Any, **kwargs: Any) -> None:
+        """Update individual fields of the active trade context without replacing the whole dict."""
+        data = getattr(context, "user_data", None)
+        if not isinstance(data, dict):
+            return
+        ctx = data.get("active_trade_context")
+        if not isinstance(ctx, dict):
+            ctx = {}
+            data["active_trade_context"] = ctx
+        ctx.update(kwargs)
+
+    @staticmethod
+    def _event_markets(event: dict) -> list[dict]:
+        """Extract the markets list from an event dict, handling varied response shapes."""
+        for key in ("markets", "market"):
+            val = event.get(key)
+            if isinstance(val, list):
+                return val
+        return []
+
+    @staticmethod
+    def _market_outcomes(market: dict) -> list[dict]:
+        """Extract the outcomes list from a market dict, handling varied response shapes."""
+        for key in ("outcomes", "outcome", "options"):
+            val = market.get(key)
+            if isinstance(val, list):
+                return val
+        return []
+
+    def _get_event_cache(self, context: Any) -> dict[str, dict]:
+        """Return the cached event data dict from user_data."""
+        ud = getattr(context, "user_data", {})
+        return ud.get("_event_cache") or {}
 
     def _format_with_view_more(self, context: Any, text: str, *, view_key: str) -> tuple[str, Optional[InlineKeyboardMarkup]]:
         preview = _detail_preview(text)
@@ -381,13 +422,17 @@ class TelegramHandler:
         await update.message.reply_text(f"<b>Balance</b>\n{text}", parse_mode="HTML")
 
     async def _cmd_portfolio(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        client = self._require_client()
-        try:
-            portfolio = await asyncio.to_thread(client.get_portfolio)
-            text = self._format_portfolio(portfolio)
-        except Exception as e:
-            text = f"Error fetching portfolio: {e}"
-        await update.message.reply_text(f"<b>Portfolio</b>\n{text}", parse_mode="HTML")
+        keyboard = InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton("NGN", callback_data="portfolio:NGN"),
+                InlineKeyboardButton("USD", callback_data="portfolio:USD"),
+            ]]
+        )
+        await update.message.reply_text(
+            "<b>Portfolio</b>\nSelect currency to view your wallet balance:",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
 
     async def _cmd_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         client = self._require_client()
@@ -399,10 +444,30 @@ class TelegramHandler:
                 limit = 10
         try:
             events = await asyncio.to_thread(client.get_open_events, 1, limit)
-            text = self._format_events(events, limit=limit)
+            if not events:
+                await update.message.reply_text("<b>Active markets</b>\nNo active markets found.", parse_mode="HTML")
+                return
+            # Cache events by ID so callback handlers can look up the full event dict
+            ud = getattr(context, "user_data", {})
+            if isinstance(ud, dict):
+                cache = ud.setdefault("_event_cache", {})
+                for ev in events:
+                    if ev.get("id"):
+                        cache[ev["id"]] = ev
+            keyboard_rows = []
+            for event in events[:limit]:
+                event_id = event.get("id", "")
+                title = event.get("title") or event.get("name") or "Untitled market"
+                if event_id:
+                    keyboard_rows.append([InlineKeyboardButton(title, callback_data=f"event:{event_id}")])
+            keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+            await update.message.reply_text(
+                "<b>Active markets</b>\nTap an event to explore its markets:",
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
         except Exception as e:
-            text = f"Error fetching active markets: {e}"
-        await update.message.reply_text(f"<b>Active markets</b>\n{text}", parse_mode="HTML")
+            await update.message.reply_text(f"Error fetching active markets: {e}", parse_mode="HTML")
 
     async def _cmd_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         client = self._require_client()
@@ -489,18 +554,66 @@ class TelegramHandler:
         text = getattr(message, "text", "") or ""
         if text.startswith("/"):
             return
+
+        ud = getattr(context, "user_data", {})
+        pending = ud.get("pending_action")
+
+        if pending == "awaiting_amount":
+            amount_match = SMART_TRADE_AMOUNT_RE.search(text.strip())
+            if not amount_match:
+                await message.reply_text("Please enter a numeric amount, e.g. 500", parse_mode="HTML")
+                return
+            amount = float(amount_match.group(1))
+            active = self._active_context(context)
+            if not all(active.get(k) for k in ("event_id", "market_id", "outcome_id", "currency")):
+                if isinstance(ud, dict):
+                    ud.pop("pending_action", None)
+                await message.reply_text(
+                    "Context lost. Please start again with /events.", parse_mode="HTML"
+                )
+                return
+            if isinstance(ud, dict):
+                ud.pop("pending_action", None)
+            side = active.get("side", "BUY").upper()
+            try:
+                result = await asyncio.to_thread(
+                    self._require_client().place_order,
+                    active["event_id"],
+                    active["market_id"],
+                    side,
+                    active["outcome_id"],
+                    amount,
+                    active["currency"],
+                    "MARKET",
+                    None, None, None, None, None,
+                )
+                reply_text = self._format_order(result)
+                view_key = _detail_key(
+                    "buy",
+                    f"{active['event_id']}:{active['market_id']}:{active['outcome_id']}:{amount}:{active['currency']}",
+                )
+                reply_text, keyboard = self._format_with_view_more(context, reply_text, view_key=view_key)
+            except Exception as e:
+                reply_text, keyboard = f"Error placing order: {e}", None
+            await message.reply_text(reply_text, reply_markup=keyboard, parse_mode="HTML")
+            return
+
         active = self._active_context(context)
         parsed = _brain_parse_trade_intent(text, active)
         if not parsed:
             return
         if not active.get("event_id") or not active.get("market_id") or not active.get("outcome_id"):
-            await message.reply_text("Pick a market first with /quote, then send something like ‘Buy, 700 NGN’.", parse_mode="HTML")
+            await message.reply_text(
+                "Pick a market first with /quote, then send something like ‘Buy, 700 NGN’.", parse_mode="HTML"
+            )
             return
         side = _normalize_text(parsed.get("side") or active.get("side") or "buy").upper()
         try:
             amount = float(parsed.get("amount"))
         except (TypeError, ValueError):
-            await message.reply_text("I couldn’t read the amount. Try something like ‘Buy, 700 NGN’.", parse_mode="HTML")
+            await message.reply_text(
+                "I couldn’t read the amount. Try something like ‘Buy, 700 NGN’.", parse_mode="HTML"
+            )
             return
         currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or active.get("currency") or "USD").upper()
         outcome_id = _normalize_text(parsed.get("outcome_id") or active.get("outcome_id"))
@@ -531,6 +644,123 @@ class TelegramHandler:
             text, keyboard = f"Error placing smart trade: {e}", None
         await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
+    async def _cb_event(self, query: Any, context: ContextTypes.DEFAULT_TYPE, event_id: str) -> None:
+        """Handle user tapping an event button — load markets and show as buttons."""
+        client = self._require_client()
+        self._update_active_context(context, event_id=event_id)
+        try:
+            event = await asyncio.to_thread(client.get_event, event_id)
+            ud = getattr(context, "user_data", {})
+            if isinstance(ud, dict):
+                ud.setdefault("_event_cache", {})[event_id] = event
+            markets = self._event_markets(event)
+            if not markets:
+                await query.edit_message_text("No markets found for this event.", parse_mode="HTML")
+                return
+            title = event.get("title") or event.get("name") or event_id
+            keyboard_rows = []
+            for market in markets:
+                market_id = market.get("id", "")
+                market_title = market.get("title") or market.get("name") or market_id
+                if market_id:
+                    keyboard_rows.append([InlineKeyboardButton(market_title, callback_data=f"market:{market_id}")])
+            keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+            await query.edit_message_text(
+                f"<b>{title}</b>\nSelect a market:",
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await query.edit_message_text(f"Error fetching event: {e}", parse_mode="HTML")
+
+    async def _cb_market(self, query: Any, context: ContextTypes.DEFAULT_TYPE, market_id: str) -> None:
+        """Handle user tapping a market button — show all outcomes as buttons."""
+        self._update_active_context(context, market_id=market_id)
+        market: Optional[dict] = None
+        for ev in self._get_event_cache(context).values():
+            for m in self._event_markets(ev):
+                if m.get("id") == market_id:
+                    market = m
+                    break
+            if market:
+                break
+        if market is None:
+            await query.edit_message_text(
+                "Market data not found. Please use /events to start fresh.", parse_mode="HTML"
+            )
+            return
+        outcomes = self._market_outcomes(market)
+        if not outcomes:
+            await query.edit_message_text("No outcomes found for this market.", parse_mode="HTML")
+            return
+        market_title = market.get("title") or market.get("name") or market_id
+        keyboard_rows = []
+        for outcome in outcomes:
+            outcome_id = outcome.get("id", "")
+            outcome_title = (
+                outcome.get("title") or outcome.get("name") or outcome.get("label") or outcome_id
+            )
+            if outcome_id:
+                keyboard_rows.append([InlineKeyboardButton(outcome_title, callback_data=f"outcome:{outcome_id}")])
+        keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+        await query.edit_message_text(
+            f"<b>{market_title}</b>\nSelect an outcome:",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+    async def _cb_outcome(self, query: Any, context: ContextTypes.DEFAULT_TYPE, outcome_id: str) -> None:
+        """Handle user tapping an outcome button — show currency selection."""
+        self._update_active_context(context, outcome_id=outcome_id, side="BUY")
+        outcome_title: Optional[str] = None
+        active = self._active_context(context)
+        market_id = active.get("market_id")
+        for ev in self._get_event_cache(context).values():
+            for m in self._event_markets(ev):
+                if m.get("id") == market_id:
+                    for o in self._market_outcomes(m):
+                        if o.get("id") == outcome_id:
+                            outcome_title = o.get("title") or o.get("name") or o.get("label")
+                            break
+                    break
+            if outcome_title:
+                break
+        label = outcome_title or outcome_id
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("NGN", callback_data="currency:NGN"),
+            InlineKeyboardButton("USD", callback_data="currency:USD"),
+        ]])
+        await query.edit_message_text(
+            f"Outcome: <b>{label}</b>\nSelect currency:",
+            reply_markup=keyboard,
+            parse_mode="HTML",
+        )
+
+    async def _cb_currency(self, query: Any, context: ContextTypes.DEFAULT_TYPE, currency: str) -> None:
+        """Handle currency selection — prompt for amount."""
+        currency = currency.upper()
+        self._update_active_context(context, currency=currency)
+        ud = getattr(context, "user_data", {})
+        if isinstance(ud, dict):
+            ud["pending_action"] = "awaiting_amount"
+        await query.edit_message_text(
+            f"Currency: <b>{currency}</b>\nHow much?",
+            parse_mode="HTML",
+        )
+
+    async def _cb_portfolio(self, query: Any, context: ContextTypes.DEFAULT_TYPE, currency: str) -> None:
+        """Handle portfolio currency selection — show wallet balance for that currency."""
+        client = self._require_client()
+        currency_up = currency.upper()
+        try:
+            assets = await asyncio.to_thread(client.get_balance)
+            asset_list = assets if isinstance(assets, list) else [assets]
+            matching = [a for a in asset_list if _normalize_text(a.get("symbol", "")).upper() == currency_up]
+            text = self._format_balance(matching if matching else asset_list)
+        except Exception as e:
+            text = f"Error fetching balance: {e}"
+        await query.edit_message_text(f"<b>Wallet Balance ({currency_up})</b>\n{text}", parse_mode="HTML")
+
     async def _on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if query is None or not getattr(query, "data", None):
@@ -545,6 +775,16 @@ class TelegramHandler:
                 await query.edit_message_text("That expanded view is no longer available.", parse_mode="HTML")
                 return
             await query.edit_message_text(full, parse_mode="HTML")
+        elif data.startswith("event:"):
+            await self._cb_event(query, context, data[len("event:"):])
+        elif data.startswith("market:"):
+            await self._cb_market(query, context, data[len("market:"):])
+        elif data.startswith("outcome:"):
+            await self._cb_outcome(query, context, data[len("outcome:"):])
+        elif data.startswith("currency:"):
+            await self._cb_currency(query, context, data[len("currency:"):])
+        elif data.startswith("portfolio:"):
+            await self._cb_portfolio(query, context, data[len("portfolio:"):])
 
     def build_application(self) -> Application:
         app = Application.builder().token(self.token).build()

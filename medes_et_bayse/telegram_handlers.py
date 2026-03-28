@@ -513,7 +513,9 @@ def _wallet_assets_text(payload: Any, *, asset_filter: Optional[str] = None, pur
     return chr(10).join(lines).strip()
 
 
-SMART_TRADE_MIN_PATTERN = re.compile(r"\b(buy|sell)\b", re.IGNORECASE)
+SMART_TRADE_MIN_PATTERN = re.compile(r"\b(buy|sell|long|short)\b", re.IGNORECASE)
+SMART_TRADE_SIDE_PATTERN = re.compile(r"\b(buy|sell|long|short)\b", re.IGNORECASE)
+SMART_TRADE_OUTCOME_PATTERN = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
 SMART_TRADE_AMOUNT_PATTERN = re.compile(r"(?<!\w)(\d+(?:\.\d+)?)(?!\w)")
 SMART_TRADE_CURRENCY_PATTERN = re.compile(r"\b(NGN|USD)\b", re.IGNORECASE)
 DETAIL_PREVIEW_LINE_LIMIT = 7
@@ -588,6 +590,55 @@ def _smart_trade_currency(candidate: dict[str, Any]) -> str:
     if "," in currency:
         currency = currency.split(",", 1)[0].strip() or "USD"
     return currency
+
+
+def _active_trade_order_state(context: Any) -> Optional[dict[str, Any]]:
+    if context is None:
+        return None
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return None
+    state = data.get("trade_order_state")
+    return state if isinstance(state, dict) else None
+
+
+def _set_trade_order_state(context: Any, candidate: dict[str, Any], **fields: Any) -> None:
+    if context is None:
+        return
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return
+    state = data.get("trade_order_state")
+    if not isinstance(state, dict):
+        state = {}
+    state.update({
+        "event_id": _first_string(candidate.get("event_id"), default=""),
+        "market_id": _first_string(candidate.get("market_id"), default=""),
+        "event_title": _first_string(candidate.get("event_title"), default=""),
+        "market_title": _first_string(candidate.get("market_title"), default=""),
+        "outcome_id": _first_string(fields.get("outcome_id") or state.get("outcome_id"), default=""),
+        "outcome_label": _first_string(fields.get("outcome_label") or state.get("outcome_label"), default=""),
+        "side": _normalize_text(fields.get("side") or state.get("side")).lower(),
+        "currency": _normalize_text(fields.get("currency") or state.get("currency")).upper(),
+        "amount": fields.get("amount") if fields.get("amount") is not None else state.get("amount"),
+        "stage": _normalize_text(fields.get("stage") or state.get("stage")).lower(),
+    })
+    data["trade_order_state"] = state
+
+
+def _clear_trade_order_state(context: Any) -> None:
+    if context is None:
+        return
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return
+    data.pop("trade_order_state", None)
+
+
+def _trade_currency_keyboard() -> Any:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("NGN", callback_data="tradec:NGN"), InlineKeyboardButton("USD", callback_data="tradec:USD")],
+    ])
 
 
 def _trade_view_bucket(context: Any) -> dict[str, dict[str, Any]]:
@@ -849,12 +900,13 @@ def _trade_keyboard(context: Any, candidate: dict[str, Any], *, selected_outcome
 def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str, Any]:
     prompt = {
         "task": "parse_short_trade_reply",
-        "instruction": "Parse a short Bayse trade reply into side, amount, currency, outcome, and whether the currency should be normalized to the market currency.",
+        "instruction": "Parse a short Bayse trade reply into side, amount, currency, outcome, and whether the currency should be normalized to the market currency. Use the active market context and active_market_id to infer the trade target when the reply is short.",
         "text": text,
         "active_context": {
             "event_title": candidate.get("event_title"),
             "market_title": candidate.get("market_title"),
             "event_id": candidate.get("event_id"),
+            "active_market_id": candidate.get("market_id"),
             "market_id": candidate.get("market_id"),
             "supported_currency": candidate.get("currency"),
         },
@@ -887,21 +939,34 @@ def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str,
             pass
 
     normalized = _normalize_text(text).lower()
-    side_match = SMART_TRADE_MIN_PATTERN.search(normalized)
+    side_match = SMART_TRADE_SIDE_PATTERN.search(normalized)
     amount_match = SMART_TRADE_AMOUNT_PATTERN.search(normalized)
     currency_match = SMART_TRADE_CURRENCY_PATTERN.search(normalized)
-    if not side_match or not amount_match:
+    outcome_match = SMART_TRADE_OUTCOME_PATTERN.search(normalized)
+    if not side_match and not amount_match and not currency_match and not outcome_match:
         return {}
-    side = side_match.group(1).lower()
-    amount = float(amount_match.group(1))
+
+    side = side_match.group(1).lower() if side_match else ""
+    if side == "long":
+        side = "buy"
+    elif side == "short":
+        side = "sell"
+
+    amount = float(amount_match.group(1)) if amount_match else None
     currency = currency_match.group(1).upper() if currency_match else _smart_trade_currency(candidate)
-    return {
+    outcome = outcome_match.group(1).upper() if outcome_match else ""
+    if not outcome and side in {"buy", "sell"}:
+        outcome = "YES" if side == "buy" else "NO"
+
+    parsed: dict[str, Any] = {
         "side": side,
-        "amount": amount,
         "currency": currency,
-        "outcome": "YES" if side == "buy" else "NO",
+        "outcome": outcome,
         "normalized_currency": _smart_trade_currency(candidate),
     }
+    if amount is not None:
+        parsed["amount"] = amount
+    return parsed
 
 
 def _looks_like_smart_trade_intent(text: str) -> bool:
@@ -1185,40 +1250,79 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     args = _split_args(text)
     active_candidate = _active_market_candidate(context)
     selected_trade = _active_trade_selection(context)
+    order_state = _active_trade_order_state(context)
     use_active_context = isinstance(active_candidate, dict) and bool(active_candidate.get("event_id")) and bool(active_candidate.get("market_id"))
     outcome_text = ""
     outcome_id = ""
 
+    event_id = _first_string(active_candidate.get("event_id") if use_active_context else None, default="")
+    market_id = _first_string(active_candidate.get("market_id") if use_active_context else None, default="")
+    side = _normalize_text((order_state or {}).get("side") or (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
+    if side == "long":
+        side = "buy"
+    elif side == "short":
+        side = "sell"
+    currency = _normalize_text((order_state or {}).get("currency")).upper()
+    amount: Optional[float] = None
+    price: Optional[float] = None
+    order_type = "MARKET"
+    trailing: list[str] = []
+
     if use_active_context and selected_trade and len(args) >= 2:
-        event_id = active_candidate["event_id"]
-        market_id = active_candidate["market_id"]
         outcome_text = _first_string(selected_trade.get("outcome_label"), default="")
-        side = _normalize_text(selected_trade.get("side") or (args[2] if len(args) >= 3 else "")).lower()
+        if not side:
+            side = _normalize_text(args[2] if len(args) >= 3 else "").lower()
         try:
             amount = float(args[0])
         except ValueError:
-            return CommandResult(False, "What order do you want to place? Send amount and currency.")
-        currency = args[1].upper()
+            return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
+        currency = _normalize_text(args[1]).upper() or currency
         trailing = args[2:]
         outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     elif use_active_context and len(args) >= 4:
-        event_id = active_candidate["event_id"]
-        market_id = active_candidate["market_id"]
         outcome_text = args[0]
-        side = args[1]
+        side = _normalize_text(args[1]).lower() or side
         try:
             amount = float(args[2])
         except ValueError:
-            return CommandResult(False, "What order do you want to place? Send outcome, buy|sell, amount, and currency.")
-        currency = args[3].upper()
+            return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
+        currency = _normalize_text(args[3]).upper() or currency
         trailing = args[4:]
+        outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+    elif use_active_context:
+        if not side:
+            side = _normalize_text(order_state.get("side") if isinstance(order_state, dict) else "").lower()
+        if not side and isinstance(selected_trade, dict):
+            side = _normalize_text(selected_trade.get("side")).lower()
+        outcome_text = _first_string((order_state or {}).get("outcome_label"), selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "", default="")
+        if not outcome_text and side in {"buy", "sell"}:
+            outcome_text = "YES" if side == "buy" else "NO"
+        if not currency and isinstance(order_state, dict):
+            currency = _normalize_text(order_state.get("currency")).upper()
+        if not currency:
+            prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nChoose a currency to continue."
+            _set_pending_interaction(context, "trade_currency", prompt=prompt)
+            return CommandResult(False, prompt, raw={"next_step": "currency", "active_market": active_candidate.get("market_id")})
+        if len(args) == 1:
+            try:
+                amount = float(args[0])
+            except ValueError:
+                return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
+        elif len(args) == 0:
+            prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nSend the amount now."
+            _set_pending_interaction(context, "trade_amount", prompt=prompt)
+            return CommandResult(False, prompt, raw={"next_step": "amount", "active_market": active_candidate.get("market_id")})
+        else:
+            try:
+                amount = float(args[0])
+            except ValueError:
+                return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
+            trailing = args[1:]
         outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     else:
         if len(args) < 6:
             if use_active_context:
-                prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nWhat order do you want to place? Send outcome, buy|sell, amount, and currency."
-                if selected_trade:
-                    prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nSelected outcome: {_safe_html(selected_trade.get('outcome_label') or 'n/a')}\nWhat order do you want to place? Send amount and currency."
+                prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nChoose an outcome and side first."
                 return CommandResult(False, prompt)
             return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
         event_id = args[0]
@@ -1233,8 +1337,12 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         trailing = args[6:]
         outcome_id = outcome_text
 
-    price: Optional[float] = None
-    order_type = "MARKET"
+    if amount is None and len(args) >= 2 and use_active_context:
+        try:
+            amount = float(args[0])
+            currency = _normalize_text(args[1]).upper() or currency
+        except ValueError:
+            return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
 
     if trailing:
         trailing_value = trailing[0]
@@ -1254,19 +1362,29 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         outcome_id = _resolve_order_outcome_id(active_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     outcome_id = _normalize_text(outcome_id)
     if not outcome_id:
-        return CommandResult(False, "I couldn’t determine the outcomeId for that trade. Pick an outcome from the event first and try again.")
+        outcome_id = _normalize_text((selected_trade or {}).get("outcome_id")).strip()
+    if not outcome_id:
+        return CommandResult(False, "Pick an outcome from the event first so I can place the order.", raw={"next_step": "outcome"})
+
+    if not side:
+        side = "buy" if _normalize_text(outcome_text).upper() == "YES" else "sell" if _normalize_text(outcome_text).upper() == "NO" else ""
+    if not side:
+        return CommandResult(False, "Choose Buy or Sell first.", raw={"next_step": "side"})
+
+    if amount is None:
+        if use_active_context:
+            prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nSend the amount now."
+            _set_pending_interaction(context, "trade_amount", prompt=prompt)
+            return CommandResult(False, prompt, raw={"next_step": "amount"})
+        return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
+
+    if not currency:
+        currency = _smart_trade_currency(active_candidate or {})
 
     try:
-        response = client.place_order(
-            event_id,
-            market_id,
-            outcome_id=outcome_id,
-            side=side.upper(),
-            amount=amount,
-            currency=currency,
-            order_type=order_type,
-            price=price,
-        )
+        response = client.place_order(event_id, market_id, outcome_id=outcome_id, side=side.upper(), amount=amount, currency=currency, order_type=order_type, price=price)
+        _clear_pending_interaction(context)
+        _clear_trade_order_state(context)
         return CommandResult(True, _order_text(OrderResponse.from_dict(response)), raw=response)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
@@ -1283,9 +1401,13 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
 
     parsed = _brain_parse_trade_intent(text, active_candidate)
     if not parsed:
-        return CommandResult(False, "I couldn’t parse that trade. Try something like ‘Buy, 700 NGN’ or ‘Sell, 1 USD’.")
+        return CommandResult(False, "I couldn’t parse that trade. Try something like ‘Buy Yes for 200 NGN’ or ‘Sell No at 1 USD’.")
 
     side = _normalize_text(parsed.get("side")).lower()
+    if side == "long":
+        side = "buy"
+    elif side == "short":
+        side = "sell"
     if side not in {"buy", "sell"}:
         return CommandResult(False, "I couldn’t determine whether that was a buy or sell. Try again with buy or sell first.")
 
@@ -1293,27 +1415,25 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     try:
         amount = float(amount_value)
     except (TypeError, ValueError):
-        return CommandResult(False, "I couldn’t read the amount. Try something like ‘Buy, 700 NGN’.")
+        return CommandResult(False, "I couldn’t read the amount. Try something like ‘Buy Yes for 200 NGN’.")
 
     selected_trade = _active_trade_selection(context)
     currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or _smart_trade_currency(active_candidate)).upper()
     if not currency:
         currency = _smart_trade_currency(active_candidate)
 
-    outcome = _normalize_text(
-        parsed.get("outcome")
-        or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "")
-        or ("YES" if side == "buy" else "NO")
-    ).upper()
+    outcome = _normalize_text(parsed.get("outcome") or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "") or ("YES" if side == "buy" else "NO")).upper()
+    if outcome in {"LONG", "SHORT"}:
+        outcome = "YES" if outcome == "LONG" else "NO"
     if not outcome:
         outcome = "YES" if side == "buy" else "NO"
 
+    _set_trade_order_state(context, active_candidate, side=side, currency=currency, amount=amount, outcome_label=outcome, stage="ready")
     synthetic_text = f"{outcome} {side} {amount:g} {currency}"
     result = build_order_command(client, synthetic_text, context=context)
     if result.ok and isinstance(result.raw, dict):
         return CommandResult(result.ok, result.text, raw={**result.raw, "smart_trade": True, "smart_trade_source": text, "smart_trade_parsed": parsed})
     return result
-
 
 
 def build_events_command(client: BayseClient, text: str = "") -> CommandResult:
@@ -1614,7 +1734,7 @@ def _general_plain_text_response(text: str) -> CommandResult:
     return CommandResult(True, chr(10).join([
         "<b>Medes Et Bayse</b>",
         "Try /events to browse markets, /quote to inspect one, or /order to place a trade.",
-        "If you already picked a market, just send quote, order, or a short reply like “Buy, 700 NGN” and I’ll reuse the active context.",
+        "If you already picked a market, just send quote, order, or a short reply like “Buy Yes for 200 NGN” and I’ll reuse the active context.",
         GENERAL_QUANT_GUIDANCE.capitalize(),
     ]))
 
@@ -1673,6 +1793,37 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
             _clear_pending_interaction(context)
         return result
 
+    if kind == "trade_currency":
+        if not text_value:
+            return CommandResult(False, "Choose NGN or USD to continue.", raw={"next_step": "currency"})
+        currency = _normalize_text(text_value).upper()
+        if currency not in {"NGN", "USD"}:
+            return CommandResult(False, "Choose NGN or USD to continue.", raw={"next_step": "currency"})
+        candidate = _active_market_candidate(context) or {}
+        if isinstance(candidate, dict) and candidate:
+            state = _active_trade_order_state(context) or {}
+            _set_trade_order_state(candidate, context=context, currency=currency, stage="amount", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"))
+        _set_pending_interaction(context, "trade_amount", prompt="Send the amount now.")
+        return CommandResult(False, "Send the amount now.", raw={"next_step": "amount", "currency": currency})
+
+    if kind == "trade_amount":
+        if not text_value:
+            return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
+        state = _active_trade_order_state(context)
+        if not isinstance(state, dict) or not state.get("currency"):
+            return CommandResult(False, "Choose a currency first.", raw={"next_step": "currency"})
+        try:
+            amount = float(text_value)
+        except ValueError:
+            return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
+        candidate = _active_market_candidate(context) or {}
+        if isinstance(candidate, dict) and candidate:
+            _set_trade_order_state(candidate, context=context, amount=amount, stage="ready", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"), currency=state.get("currency"))
+        result = build_order_command(client, f"{amount:g} {_normalize_text(state.get('currency')).upper()}", context=context)
+        if result.ok:
+            _clear_pending_interaction(context)
+        return result
+
     if kind == "fund":
         if not text_value:
             return CommandResult(False, "Choose NGN or USD to see funding options.")
@@ -1692,16 +1843,16 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
     return None
 
 
-def build_natural_language_command(client: BayseClient, text: str) -> CommandResult:
+def build_natural_language_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     if not _normalize_text(text):
         return _general_plain_text_response(text)
     if _looks_like_quote_intent(text):
-        return build_quote_command(client, text)
-    smart_trade = build_smart_trade_command(client, text)
+        return build_quote_command(client, text, context=context)
+    smart_trade = build_smart_trade_command(client, text, context=context)
     if smart_trade is not None:
         return smart_trade
     if _looks_like_order_intent(text):
-        return build_order_command(client, text)
+        return build_order_command(client, text, context=context)
     if _looks_like_events_intent(text):
         return build_events_command(client, text)
     if _looks_like_watch_intent(text):
@@ -1775,7 +1926,7 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
         if pending_result is not None:
             result = pending_result
         else:
-            result = build_natural_language_command(client, text)
+            result = build_natural_language_command(client, text, context=context)
         if not result.ok:
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text, parse_mode="HTML")
@@ -1952,7 +2103,7 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             return
 
         data = str(query.data)
-        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:") or data.startswith("more:") or data.startswith("tradeo:") or data.startswith("trades:")):
+        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:") or data.startswith("more:") or data.startswith("tradeo:") or data.startswith("trades:") or data.startswith("tradec:")):
             return
 
         await query.answer()
@@ -2024,17 +2175,35 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
                     outcome_id = _resolve_order_outcome_id(candidate, side=side, selected_trade=selected_trade)
                 _set_active_market_context(context, candidate)
                 _set_trade_selection(context, candidate, outcome_id=outcome_id, outcome_label=outcome_label, side=side)
+                _set_trade_order_state(context, candidate, outcome_id=outcome_id, outcome_label=outcome_label, side=side, stage="currency")
                 details = _trade_selection_text(candidate, selected_outcome_label=outcome_label, selected_side=side)
                 preview, keyboard = _prepare_detail_view(
                     context,
                     prefix="watch",
                     identifier=_first_string(candidate.get("event_id"), candidate.get("market_id"), default=view_key),
-                    full_text=details,
+                    full_text=details + chr(10) + "Choose a currency to continue.",
                     back_callback="watch:refresh",
                     back_label="Refresh list",
-                    extra_rows=_trade_keyboard_rows(candidate, view_key=view_key, selected_outcome_id=outcome_id, selected_side=side),
+                    extra_rows=[[InlineKeyboardButton("NGN", callback_data=f"tradec:{view_key}:NGN"), InlineKeyboardButton("USD", callback_data=f"tradec:{view_key}:USD")]],
                 )
                 await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
+                return
+
+            if prefix == "tradec":
+                currency = _normalize_text(selected_value).upper()
+                if currency not in {"NGN", "USD"}:
+                    await query.edit_message_text("Invalid currency selection.", parse_mode="HTML")
+                    return
+                state = _active_trade_order_state(context) or {}
+                selected_trade = _active_trade_selection(context)
+                outcome_id = _first_string(state.get("outcome_id") if isinstance(state, dict) else "", default="")
+                outcome_label = _first_string(state.get("outcome_label") if isinstance(state, dict) else (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else ""), default="")
+                side = _normalize_text(state.get("side") if isinstance(state, dict) else (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
+                _set_active_market_context(context, candidate)
+                _set_trade_order_state(context, candidate, outcome_id=outcome_id, outcome_label=outcome_label, side=side, currency=currency, stage="amount")
+                prompt = f"Active market: {_safe_html(candidate.get('event_title') or '')} · {_safe_html(candidate.get('market_title') or '')}\nCurrency: {_safe_html(currency)}\nSend the amount now."
+                _set_pending_interaction(context, "trade_amount", prompt=prompt)
+                await query.edit_message_text(prompt, parse_mode="HTML")
                 return
 
         if prefix == "quote":

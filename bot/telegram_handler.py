@@ -7,9 +7,13 @@ Provides outbound notifications and inbound commands:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
+import re
 import threading
-from typing import Optional
+from typing import Any, Optional
+from urllib import error, request
 
 from loguru import logger
 
@@ -20,6 +24,93 @@ except ImportError as exc:
     raise ImportError("python-telegram-bot is required. Install it with: pip install python-telegram-bot") from exc
 
 DEFAULT_CHAT_ID = "6433282551"
+
+
+SMART_TRADE_SIDE_RE = re.compile(r"\b(buy|sell)\b", re.IGNORECASE)
+SMART_TRADE_AMOUNT_RE = re.compile(r"(?<!\w)(\d+(?:\.\d+)?)(?!\w)")
+SMART_TRADE_CURRENCY_RE = re.compile(r"\b(NGN|USD)\b", re.IGNORECASE)
+DETAIL_PREVIEW_LINE_LIMIT = 6
+
+
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _detail_store(context: Any) -> dict[str, str]:
+    if context is None:
+        return {}
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return {}
+    store = data.get("detail_views")
+    if not isinstance(store, dict):
+        store = {}
+        data["detail_views"] = store
+    return store
+
+
+def _detail_key(prefix: str, identifier: str) -> str:
+    return hashlib.sha1(f"{prefix}:{identifier}".encode("utf-8")).hexdigest()[:12]
+
+
+def _detail_preview(full_text: str, limit_lines: int = DETAIL_PREVIEW_LINE_LIMIT) -> str:
+    lines = (full_text or "").split(chr(10))
+    if len(lines) <= limit_lines:
+        return full_text
+    preview = lines[:limit_lines]
+    preview.append("Tap View more for the full details.")
+    return chr(10).join(preview)
+
+
+def _detail_keyboard(view_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("View more", callback_data=f"more:{view_key}")]])
+
+
+def _brain_parse_trade_intent(text: str, active_context: dict[str, Any]) -> dict[str, Any]:
+    brain_url = os.getenv("POKE_BRAIN_URL", "").strip() or os.getenv("POKE_API_BRAIN_URL", "").strip()
+    api_key = os.getenv("POKE_API_KEY", "").strip()
+    prompt = {
+        "task": "parse_short_trade_reply",
+        "text": text,
+        "active_context": active_context,
+        "expected_shape": {
+            "side": "buy|sell",
+            "amount": 700,
+            "currency": "NGN|USD",
+            "outcome_id": "optional",
+            "normalized_currency": "market currency if conversion is needed",
+        },
+    }
+
+    if brain_url:
+        try:
+            body = json.dumps(prompt).encode("utf-8")
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            req = request.Request(brain_url, data=body, headers=headers, method="POST")
+            with request.urlopen(req, timeout=12) as resp:
+                payload = resp.read().decode("utf-8")
+            if payload:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    result = parsed.get("result")
+                    if isinstance(result, dict):
+                        return result
+                    return parsed
+        except Exception:
+            pass
+
+    normalized = _normalize_text(text).lower()
+    side_match = SMART_TRADE_SIDE_RE.search(normalized)
+    amount_match = SMART_TRADE_AMOUNT_RE.search(normalized)
+    currency_match = SMART_TRADE_CURRENCY_RE.search(normalized)
+    if not side_match or not amount_match:
+        return {}
+    side = side_match.group(1).lower()
+    amount = float(amount_match.group(1))
+    currency = currency_match.group(1).upper() if currency_match else _normalize_text(active_context.get("currency") or "USD").upper()
+    return {"side": side, "amount": amount, "currency": currency, "outcome_id": active_context.get("outcome_id")}
 
 
 class TelegramHandler:
@@ -80,6 +171,29 @@ class TelegramHandler:
         if self.bayse_client is None:
             raise RuntimeError("Bayse client not configured")
         return self.bayse_client
+
+    def _store_active_context(self, context: Any, *, event_id: str, market_id: str, outcome_id: str, currency: str, side: str = "BUY") -> None:
+        if context is None:
+            return
+        data = getattr(context, "user_data", None)
+        if not isinstance(data, dict):
+            return
+        data["active_trade_context"] = {"event_id": event_id, "market_id": market_id, "outcome_id": outcome_id, "currency": currency, "side": side.upper()}
+
+    def _active_context(self, context: Any) -> dict[str, Any]:
+        data = getattr(context, "user_data", None)
+        if not isinstance(data, dict):
+            return {}
+        value = data.get("active_trade_context")
+        return value if isinstance(value, dict) else {}
+
+    def _format_with_view_more(self, context: Any, text: str, *, view_key: str) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+        preview = _detail_preview(text)
+        if preview == text:
+            return text, None
+        store = _detail_store(context)
+        store[view_key] = text
+        return preview, _detail_keyboard(view_key)
 
     @staticmethod
     def _parse_tokens(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
@@ -239,7 +353,8 @@ class TelegramHandler:
             "/portfolio — open positions\n"
             "/events — active markets\n"
             "/quote — price quote before an order\n"
-            "/order — place a Bayse order\n\n"
+            "/order — place a Bayse order\n"
+            "Reply with a short trade like 'Buy, 700 NGN' after you set an active market with /quote\n\n"
             "Examples:\n"
             "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD\n"
             "/order event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 type=MARKET currency=USD",
@@ -307,9 +422,13 @@ class TelegramHandler:
             amount = float(amount_raw)
             quote = await asyncio.to_thread(client.get_quote, event_id, market_id, side, outcome_id, amount, currency)
             text = self._format_quote(quote, event_id, market_id, side, outcome_id, amount, currency)
+            self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, currency=currency, side=side)
+            view_key = _detail_key("quote", f"{event_id}:{market_id}:{outcome_id}:{amount}:{currency}")
+            text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:
             text = f"Error fetching quote: {e}\n\n{self._usage_quote()}"
-        await update.message.reply_text(text, parse_mode="HTML")
+            keyboard = None
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     async def _cmd_order(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         client = self._require_client()
@@ -355,9 +474,77 @@ class TelegramHandler:
                 expires_at or None,
             )
             text = self._format_order(result)
+            self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, currency=currency, side=side)
+            view_key = _detail_key("order", f"{event_id}:{market_id}:{outcome_id}:{amount}:{currency}:{order_type}")
+            text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:
             text = f"Error placing order: {e}\n\n{self._usage_order()}"
-        await update.message.reply_text(text, parse_mode="HTML")
+            keyboard = None
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+    async def _cmd_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message or update.message
+        if message is None:
+            return
+        text = getattr(message, "text", "") or ""
+        if text.startswith("/"):
+            return
+        active = self._active_context(context)
+        parsed = _brain_parse_trade_intent(text, active)
+        if not parsed:
+            return
+        if not active.get("event_id") or not active.get("market_id") or not active.get("outcome_id"):
+            await message.reply_text("Pick a market first with /quote, then send something like ‘Buy, 700 NGN’.", parse_mode="HTML")
+            return
+        side = _normalize_text(parsed.get("side") or active.get("side") or "buy").upper()
+        try:
+            amount = float(parsed.get("amount"))
+        except (TypeError, ValueError):
+            await message.reply_text("I couldn’t read the amount. Try something like ‘Buy, 700 NGN’.", parse_mode="HTML")
+            return
+        currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or active.get("currency") or "USD").upper()
+        outcome_id = _normalize_text(parsed.get("outcome_id") or active.get("outcome_id"))
+        if not outcome_id:
+            await message.reply_text("I need an active market outcome first. Use /quote to set one.", parse_mode="HTML")
+            return
+        try:
+            result = await asyncio.to_thread(
+                self._require_client().place_order,
+                active["event_id"],
+                active["market_id"],
+                side,
+                outcome_id,
+                amount,
+                currency,
+                "MARKET",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            text = self._format_order(result)
+            self._store_active_context(context, event_id=active["event_id"], market_id=active["market_id"], outcome_id=outcome_id, currency=currency, side=side)
+            view_key = _detail_key("smart-trade", f"{active['event_id']}:{active['market_id']}:{outcome_id}:{amount}:{currency}:{side}")
+            text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
+        except Exception as e:
+            text, keyboard = f"Error placing smart trade: {e}", None
+        await message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+    async def _on_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if query is None or not getattr(query, "data", None):
+            return
+        data = str(query.data)
+        await query.answer()
+        if data.startswith("more:"):
+            key = data.split(":", 1)[1]
+            store = _detail_store(context)
+            full = store.get(key)
+            if not full:
+                await query.edit_message_text("That expanded view is no longer available.", parse_mode="HTML")
+                return
+            await query.edit_message_text(full, parse_mode="HTML")
 
     def build_application(self) -> Application:
         app = Application.builder().token(self.token).build()
@@ -369,6 +556,8 @@ class TelegramHandler:
         app.add_handler(CommandHandler("events", self._cmd_events))
         app.add_handler(CommandHandler("quote", self._cmd_quote))
         app.add_handler(CommandHandler("order", self._cmd_order))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._cmd_text))
+        app.add_handler(CallbackQueryHandler(self._on_callback))
         self._app = app
         return app
 

@@ -539,6 +539,58 @@ def _quote_candidates_from_events(events: list[dict[str, Any]]) -> list[dict[str
     return candidates
 
 
+def _candidate_from_event_market(event: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
+    yes_price, no_price = _market_yes_no_prices(market)
+    return {
+        "event": event,
+        "market": market,
+        "event_title": _event_title(event),
+        "market_title": _market_title(market),
+        "yes_price": yes_price,
+        "no_price": no_price,
+        "event_id": _first_string(event.get("id"), event.get("eventId"), default=""),
+        "market_id": _first_string(market.get("id"), market.get("marketId"), default=""),
+        "outcome1_id": _first_string(market.get("outcome1Id"), default=""),
+        "outcome2_id": _first_string(market.get("outcome2Id"), default=""),
+        "currency": _event_currency_label(event),
+        "status": _first_string(market.get("status"), event.get("status"), default=""),
+    }
+
+
+def _active_market_candidate(context: Any) -> Optional[dict[str, Any]]:
+    if context is None:
+        return None
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return None
+    candidate = data.get("active_market_candidate")
+    if isinstance(candidate, dict):
+        return candidate
+    candidate = data.get("active_quote")
+    if isinstance(candidate, dict):
+        return candidate
+    event = data.get("active_event")
+    market = data.get("active_market")
+    if isinstance(event, dict) and isinstance(market, dict):
+        return _candidate_from_event_market(event, market)
+    return None
+
+
+def _set_active_market_context(context: Any, candidate: dict[str, Any]) -> None:
+    if context is None:
+        return
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return
+    event = candidate.get("event") if isinstance(candidate.get("event"), dict) else None
+    market = candidate.get("market") if isinstance(candidate.get("market"), dict) else None
+    if isinstance(event, dict):
+        data["active_event"] = event
+    if isinstance(market, dict):
+        data["active_market"] = market
+    data["active_market_candidate"] = candidate
+
+
 def _quote_keyboard(candidates: list[dict[str, Any]]) -> Any:
     rows = []
     for index, candidate in enumerate(candidates[:10]):
@@ -679,10 +731,23 @@ def build_withdraw_command(client: Optional[BayseClient] = None, text: str = "")
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
-def build_quote_command(client: BayseClient, text: str) -> CommandResult:
+def build_quote_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     term = _search_term_after(text, QUOTE_STOP_WORDS)
+    active_candidate = _active_market_candidate(context)
+    if not term and active_candidate:
+        market_id = active_candidate.get("market_id")
+        if market_id:
+            try:
+                quote_payload = client.get_ticker(market_id)
+                quote_response = QuoteResponse.from_dict(quote_payload)
+                raw = {"mode": "quote", "term": "", "events": [active_candidate.get("event")], "quote_candidates": [active_candidate], "payload": quote_payload, "active": True}
+                return CommandResult(True, _selected_quote_text(active_candidate, quote_response), raw=raw)
+            except BayseClientError as exc:
+                return CommandResult(False, _error_text(exc))
+            except Exception as exc:
+                return CommandResult(False, f"Bayse API error\nmessage: {exc}")
     if not term:
-        return CommandResult(False, "Usage: /quote <market name or symbol>")
+        return CommandResult(False, "What do you want to quote?")
 
     payload: Any = None
     if _is_uuid_like(term):
@@ -714,35 +779,51 @@ def build_quote_command(client: BayseClient, text: str) -> CommandResult:
     return CommandResult(True, _quote_search_text(term, candidates), raw=raw)
 
 
-def build_order_command(client: BayseClient, text: str) -> CommandResult:
+def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     args = _split_args(text)
-    if len(args) < 6:
-        return CommandResult(False, "Usage: /order <event name> <market name> <outcome> <buy|sell> <amount> <currency> [price] [LIMIT|MARKET]")
+    active_candidate = _active_market_candidate(context)
+    use_active_context = isinstance(active_candidate, dict) and bool(active_candidate.get("event_id")) and bool(active_candidate.get("market_id"))
 
-    event_id = args[0]
-    market_id = args[1]
-    outcome = args[2]
-    side = args[3]
+    if use_active_context and len(args) >= 4:
+        event_id = active_candidate["event_id"]
+        market_id = active_candidate["market_id"]
+        outcome = args[0]
+        side = args[1]
+        try:
+            amount = float(args[2])
+        except ValueError:
+            return CommandResult(False, "What order do you want to place? Send outcome, buy|sell, amount, and currency.")
+        currency = args[3].upper()
+        trailing = args[4:]
+    else:
+        if len(args) < 6:
+            if use_active_context:
+                return CommandResult(False, f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nWhat order do you want to place? Send outcome, buy|sell, amount, and currency.")
+            return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
+        event_id = args[0]
+        market_id = args[1]
+        outcome = args[2]
+        side = args[3]
+        try:
+            amount = float(args[4])
+        except ValueError:
+            return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
+        currency = args[5].upper()
+        trailing = args[6:]
 
-    try:
-        amount = float(args[4])
-    except ValueError:
-        return CommandResult(False, "Usage: /order <event name> <market name> <outcome> <buy|sell> <amount> <currency> [price] [LIMIT|MARKET]")
-
-    currency = args[5].upper()
     price: Optional[float] = None
     order_type = "LIMIT"
 
-    if len(args) >= 7:
-        trailing = args[6]
+    if trailing:
+        trailing_value = trailing[0]
         try:
-            price = float(trailing)
-            if len(args) >= 8:
-                order_type = args[7].upper()
+            price = float(trailing_value)
+            if len(trailing) >= 2:
+                order_type = trailing[1].upper()
         except ValueError:
-            order_type = trailing.upper()
+            order_type = trailing_value.upper()
             if order_type not in {"LIMIT", "MARKET"}:
-                return CommandResult(False, "Usage: /order <event name> <market name> <outcome> <buy|sell> <amount> <currency> [price] [LIMIT|MARKET]")
+                return CommandResult(False, "What order do you want to place? Send outcome, buy|sell, amount, and currency.")
             if order_type == "MARKET":
                 price = None
 
@@ -974,6 +1055,20 @@ def _looks_like_quote_intent(text: str) -> bool:
     return any(keyword in normalized for keyword in ("quote", "price", "ticker"))
 
 
+def _looks_like_order_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("order", "buy", "sell", "long", "short", "trade", "place", "limit", "market"))
+
+
+def _general_plain_text_response(text: str) -> CommandResult:
+    return CommandResult(True, chr(10).join([
+        "<b>Medes Et Bayse</b>",
+        "Try /events to browse markets, /quote to inspect one, or /order to place a trade.",
+        "If you already picked a market, just send quote or order and I’ll reuse the active context.",
+        GENERAL_QUANT_GUIDANCE.capitalize(),
+    ]))
+
+
 def _pending_interaction_kind(context: Any) -> str:
     pending = getattr(context, "user_data", {}).get("pending_interaction") if context is not None else None
     if isinstance(pending, dict):
@@ -1002,7 +1097,7 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
     if kind == "quote":
         if not text_value:
             return CommandResult(False, "What do you want to quote?")
-        result = build_quote_command(client, text_value)
+        result = build_quote_command(client, text_value, context=context)
         if result.ok:
             _clear_pending_interaction(context)
         return result
@@ -1018,7 +1113,7 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
     if kind == "order":
         if not text_value:
             return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
-        result = build_order_command(client, text_value)
+        result = build_order_command(client, text_value, context=context)
         if result.ok:
             _clear_pending_interaction(context)
         return result
@@ -1047,6 +1142,8 @@ def build_natural_language_command(client: BayseClient, text: str) -> CommandRes
         return _general_plain_text_response(text)
     if _looks_like_quote_intent(text):
         return build_quote_command(client, text)
+    if _looks_like_order_intent(text):
+        return build_order_command(client, text)
     if _looks_like_events_intent(text):
         return build_events_command(client, text)
     if _looks_like_watch_intent(text):
@@ -1129,8 +1226,10 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
             candidates = result.raw.get("quote_candidates", [])
             context.user_data["quote_candidates"] = candidates
             context.user_data["quote_search_term"] = result.raw.get("term")
-            context.user_data.pop("active_event", None)
-            context.user_data.pop("active_market", None)
+            if not result.raw.get("active"):
+                context.user_data.pop("active_event", None)
+                context.user_data.pop("active_market", None)
+                context.user_data.pop("active_market_candidate", None)
             print(json.dumps({"telegram": "text_routed", "route": "quote_search", "text": text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text, reply_markup=_quote_keyboard(candidates), parse_mode="HTML")
             return
@@ -1193,15 +1292,16 @@ def quote_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         if message is None:
             return
         text = getattr(message, "text", "") or ""
-        if len(_split_args(text)) == 0:
+        active_candidate = _active_market_candidate(context)
+        if len(_split_args(text)) == 0 and not active_candidate:
             _set_pending_interaction(context, "quote", prompt="What do you want to quote?")
             await message.reply_text("What do you want to quote?", parse_mode="HTML")
             return
-        result = build_quote_command(client, text)
+        result = build_quote_command(client, text, context=context)
         if _should_suppress_debug_message(result.text):
             return
         candidates = result.raw.get("quote_candidates", []) if result.raw else []
-        if candidates:
+        if candidates and not result.raw.get("active"):
             context.user_data["quote_candidates"] = candidates
             context.user_data["quote_search_term"] = result.raw.get("term") if result.raw else None
             await message.reply_text(result.text, reply_markup=_quote_keyboard(candidates), parse_mode="HTML")
@@ -1217,14 +1317,16 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         if message is None:
             return
         text = getattr(message, "text", "") or ""
-        if len(_split_args(text)) < 6:
-            _set_pending_interaction(context, "order", prompt="What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
-            await message.reply_text(
-                "What order do you want to place? Send the event, market, outcome, side, amount, and currency.",
-                parse_mode="HTML",
-            )
+        active_candidate = _active_market_candidate(context)
+        needs_prompt = len(_split_args(text)) < 6 and not (active_candidate and len(_split_args(text)) >= 4)
+        if needs_prompt:
+            _set_pending_interaction(context, "order", prompt="What order do you want to place? Send outcome, buy|sell, amount, and currency.")
+            prompt = "What order do you want to place? Send outcome, buy|sell, amount, and currency."
+            if active_candidate:
+                prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\n" + prompt
+            await message.reply_text(prompt, parse_mode="HTML")
             return
-        result = build_order_command(client, text)
+        result = build_order_command(client, text, context=context)
         if _should_suppress_debug_message(result.text):
             return
         await message.reply_text(result.text, parse_mode="HTML")
@@ -1316,8 +1418,7 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
                 return
 
             candidate = candidates[index]
-            context.user_data["active_event"] = candidate.get("event")
-            context.user_data["active_market"] = candidate.get("market")
+            _set_active_market_context(context, candidate)
             context.user_data["active_quote"] = candidate
 
             quote_response = None
@@ -1367,9 +1468,14 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
 
         context.user_data["watchlist_event_id"] = selected
         context.user_data["watchlist_event"] = event
-        context.user_data["active_event"] = event
         markets = _event_markets(event)
-        context.user_data["active_market"] = markets[0] if markets else None
+        candidate = _candidate_from_event_market(event, markets[0]) if markets else None
+        if candidate:
+            _set_active_market_context(context, candidate)
+        else:
+            context.user_data["active_event"] = event
+            context.user_data["active_market"] = None
+            context.user_data["active_market_candidate"] = None
 
         details = _event_details_text(event, heading="Watching")
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Refresh list", callback_data="watch:refresh")]])

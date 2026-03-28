@@ -2037,13 +2037,19 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             if scenario:
                 await send_scenario_sticker(message, scenario)
             return
-        needs_prompt = len(_split_args(text)) < 6 and not (active_candidate and len(_split_args(text)) >= 4)
+        if active_candidate:
+            result = build_order_command(client, text, context=context)
+            if _should_suppress_debug_message(result.text):
+                return
+            await message.reply_text(result.text, parse_mode="HTML")
+            scenario = _order_scenario_from_result(result)
+            if scenario:
+                await send_scenario_sticker(message, scenario)
+            return
+        needs_prompt = len(_split_args(text)) < 6
         if needs_prompt:
             _set_pending_interaction(context, "order", prompt="What order do you want to place? Send outcome, buy|sell, amount, and currency.")
-            prompt = "What order do you want to place? Send outcome, buy|sell, amount, and currency."
-            if active_candidate:
-                prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\n" + prompt
-            await message.reply_text(prompt, parse_mode="HTML")
+            await message.reply_text("What order do you want to place? Send outcome, buy|sell, amount, and currency.", parse_mode="HTML")
             return
         result = build_order_command(client, text, context=context)
         if _should_suppress_debug_message(result.text):

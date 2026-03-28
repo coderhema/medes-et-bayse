@@ -546,10 +546,19 @@ def _detail_preview_text(full_text: str, *, limit_lines: int = DETAIL_PREVIEW_LI
     return chr(10).join(preview)
 
 
-def _detail_keyboard(view_key: str, *, back_callback: Optional[str] = None, view_more: bool = True, back_label: str = "Back") -> Any:
+def _detail_keyboard(
+    view_key: str,
+    *,
+    back_callback: Optional[str] = None,
+    view_more: bool = True,
+    back_label: str = "Back",
+    extra_rows: Optional[list[list[Any]]] = None,
+) -> Any:
     rows = []
     if view_more:
         rows.append([InlineKeyboardButton("View more", callback_data=f"more:{view_key}")])
+    if extra_rows:
+        rows.extend(extra_rows)
     if back_callback:
         rows.append([InlineKeyboardButton(back_label, callback_data=back_callback)])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -563,14 +572,15 @@ def _prepare_detail_view(
     full_text: str,
     back_callback: Optional[str] = None,
     back_label: str = "Back",
+    extra_rows: Optional[list[list[Any]]] = None,
 ) -> tuple[str, Any]:
     key = _detail_view_key(prefix, identifier)
     bucket = _detail_view_bucket(context)
     bucket[key] = {"text": full_text, "back_callback": back_callback, "back_label": back_label}
     preview = _detail_preview_text(full_text)
     if preview != full_text:
-        return preview, _detail_keyboard(key, back_callback=back_callback, view_more=True, back_label=back_label)
-    return full_text, _detail_keyboard(key, back_callback=back_callback, view_more=False, back_label=back_label)
+        return preview, _detail_keyboard(key, back_callback=back_callback, view_more=True, back_label=back_label, extra_rows=extra_rows)
+    return full_text, _detail_keyboard(key, back_callback=back_callback, view_more=False, back_label=back_label, extra_rows=extra_rows)
 
 
 def _smart_trade_currency(candidate: dict[str, Any]) -> str:
@@ -578,6 +588,262 @@ def _smart_trade_currency(candidate: dict[str, Any]) -> str:
     if "," in currency:
         currency = currency.split(",", 1)[0].strip() or "USD"
     return currency
+
+
+def _trade_view_bucket(context: Any) -> dict[str, dict[str, Any]]:
+    if context is None:
+        return {}
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return {}
+    bucket = data.get("trade_views")
+    if not isinstance(bucket, dict):
+        bucket = {}
+        data["trade_views"] = bucket
+    return bucket
+
+
+def _trade_view_key(candidate: dict[str, Any]) -> str:
+    event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), default="")
+    market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), default="")
+    base = f"{event_id}:{market_id}".strip(":") or _first_string(candidate.get("event_title"), candidate.get("market_title"), default="trade")
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
+
+
+def _active_trade_selection(context: Any) -> Optional[dict[str, Any]]:
+    if context is None:
+        return None
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return None
+    selection = data.get("trade_selection")
+    return selection if isinstance(selection, dict) else None
+
+
+def _set_trade_selection(
+    context: Any,
+    candidate: dict[str, Any],
+    *,
+    outcome_id: Optional[str] = None,
+    outcome_label: Optional[str] = None,
+    side: Optional[str] = None,
+) -> None:
+    if context is None:
+        return
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return
+    data["trade_selection"] = {
+        "event_id": _first_string(candidate.get("event_id"), default=""),
+        "market_id": _first_string(candidate.get("market_id"), default=""),
+        "outcome_id": _first_string(outcome_id, default=""),
+        "outcome_label": _first_string(outcome_label, default=""),
+        "side": _normalize_text(side).lower(),
+    }
+
+
+def _clear_trade_selection(context: Any) -> None:
+    if context is None:
+        return
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return
+    data.pop("trade_selection", None)
+
+
+def _trade_outcomes(market: dict[str, Any]) -> list[dict[str, Any]]:
+    outcomes: list[dict[str, Any]] = []
+    raw_outcomes = market.get("outcomes")
+    if isinstance(raw_outcomes, list):
+        for index, outcome in enumerate(raw_outcomes):
+            if not isinstance(outcome, dict):
+                continue
+            label = _first_string(
+                outcome.get("name"),
+                outcome.get("label"),
+                outcome.get("title"),
+                outcome.get("side"),
+                outcome.get("description"),
+                default=f"Outcome {index + 1}",
+            )
+            outcomes.append({
+                "label": label or f"Outcome {index + 1}",
+                "outcome_id": _first_string(outcome.get("id"), outcome.get("outcomeId"), outcome.get("outcome_id"), default=""),
+                "raw": outcome,
+            })
+        if outcomes:
+            return outcomes
+
+    yes_id = _first_string(market.get("outcome1Id"), market.get("yesOutcomeId"), default="")
+    no_id = _first_string(market.get("outcome2Id"), market.get("noOutcomeId"), default="")
+    yes_label = _first_string(market.get("outcome1"), market.get("outcome1Name"), market.get("yesOutcome"), market.get("yesLabel"), default="Yes")
+    no_label = _first_string(market.get("outcome2"), market.get("outcome2Name"), market.get("noOutcome"), market.get("noLabel"), default="No")
+    if yes_id or no_id or any(key in market for key in ("yesBuyPrice", "noBuyPrice", "outcome1Price", "outcome2Price")):
+        return [
+            {"label": yes_label or "Yes", "outcome_id": yes_id, "raw": {"name": yes_label or "Yes"}},
+            {"label": no_label or "No", "outcome_id": no_id, "raw": {"name": no_label or "No"}},
+        ]
+
+    return []
+
+
+def _trade_outcome_aliases(outcome: dict[str, Any]) -> set[str]:
+    aliases = {
+        _normalize_text(outcome.get("label")).lower(),
+        _normalize_text(outcome.get("outcome_id")).lower(),
+    }
+    raw = outcome.get("raw") if isinstance(outcome.get("raw"), dict) else {}
+    aliases.update({
+        _normalize_text(raw.get("name")).lower(),
+        _normalize_text(raw.get("label")).lower(),
+        _normalize_text(raw.get("title")).lower(),
+        _normalize_text(raw.get("side")).lower(),
+        _normalize_text(raw.get("outcome")).lower(),
+    })
+    return {alias for alias in aliases if alias}
+
+
+def _resolve_order_outcome_id(
+    candidate: dict[str, Any],
+    *,
+    outcome_text: str = "",
+    side: str = "",
+    selected_trade: Optional[dict[str, Any]] = None,
+) -> str:
+    market = candidate.get("market") if isinstance(candidate.get("market"), dict) else {}
+    if selected_trade:
+        selected_id = _first_string(selected_trade.get("outcome_id"), default="")
+        if selected_id:
+            return selected_id
+
+    normalized_outcome = _normalize_text(outcome_text).lower()
+    normalized_side = _normalize_text(side).lower()
+    outcomes = _trade_outcomes(market)
+    if normalized_outcome and outcomes:
+        for outcome in outcomes:
+            if normalized_outcome in _trade_outcome_aliases(outcome):
+                return _first_string(outcome.get("outcome_id"), default="")
+
+    if outcomes:
+        if normalized_side == "buy":
+            return _first_string(outcomes[0].get("outcome_id"), default="")
+        if normalized_side == "sell":
+            if len(outcomes) > 1:
+                return _first_string(outcomes[1].get("outcome_id"), default="")
+            return _first_string(outcomes[0].get("outcome_id"), default="")
+
+    return _first_string(
+        market.get("outcome1Id"),
+        market.get("outcome2Id"),
+        market.get("outcomeId"),
+        market.get("selectedOutcomeId"),
+        default="",
+    )
+
+
+def _brain_quant_prediction(candidate: dict[str, Any]) -> str:
+    prompt = {
+        "task": "compose_quant_prediction",
+        "instruction": "Write a short market-aware prediction blurb for the user. Keep it concise, practical, and grounded in the active market context. Avoid certainty unless the context is clear.",
+        "active_context": {
+            "event_title": candidate.get("event_title"),
+            "market_title": candidate.get("market_title"),
+            "event_id": candidate.get("event_id"),
+            "market_id": candidate.get("market_id"),
+            "currency": candidate.get("currency"),
+            "yes_price": candidate.get("yes_price"),
+            "no_price": candidate.get("no_price"),
+        },
+        "expected_shape": {
+            "blurb": "A short actionable prediction sentence or two",
+        },
+    }
+
+    brain_url = os.getenv("POKE_BRAIN_URL", "").strip() or os.getenv("POKE_API_BRAIN_URL", "").strip()
+    poke_api_key = os.getenv("POKE_API_KEY", "").strip()
+    if brain_url:
+        try:
+            body = json.dumps(prompt).encode("utf-8")
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if poke_api_key:
+                headers["Authorization"] = f"Bearer {poke_api_key}"
+            req = request.Request(brain_url, data=body, headers=headers, method="POST")
+            with request.urlopen(req, timeout=12) as resp:
+                payload = resp.read().decode("utf-8")
+            if payload:
+                parsed = json.loads(payload)
+                if isinstance(parsed, dict):
+                    for key in ("blurb", "text", "message", "result"):
+                        value = parsed.get(key)
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+                        if isinstance(value, dict):
+                            nested = _first_string(value.get("blurb"), value.get("text"), value.get("message"), default="")
+                            if nested:
+                                return nested
+        except Exception:
+            pass
+
+    yes_price = candidate.get("yes_price")
+    no_price = candidate.get("no_price")
+    try:
+        yes_num = float(yes_price)
+    except (TypeError, ValueError):
+        yes_num = None
+    try:
+        no_num = float(no_price)
+    except (TypeError, ValueError):
+        no_num = None
+
+    if yes_num is not None and no_num is not None:
+        if yes_num >= 0.7:
+            return "The market is leaning hard toward YES, so I’d treat fresh buys as crowded and prefer patience or a lighter contrarian entry."
+        if yes_num <= 0.3:
+            return "The market is leaning hard toward NO, so the cleaner edge is usually on the opposite side if the thesis still holds."
+        return "The market looks balanced, which usually means smaller size, cleaner confirmation, and no rushed entry."
+
+    return "The market context looks incomplete, so wait for cleaner confirmation before taking size."
+
+
+def _trade_selection_text(candidate: dict[str, Any], *, selected_outcome_label: Optional[str] = None, selected_side: Optional[str] = None) -> str:
+    lines = [
+        _event_details_text(candidate.get("event") if isinstance(candidate.get("event"), dict) else {}, heading="Selected event"),
+        f"<b>Active market</b>: {_bold(candidate.get('market_title') or '')}",
+        f"<b>Poke's Quant Prediction</b>",
+        _safe_html(_brain_quant_prediction(candidate)),
+    ]
+    if selected_outcome_label:
+        lines.append(f"Selected outcome: {_safe_html(selected_outcome_label)}")
+    if selected_side:
+        lines.append(f"Selected side: {_safe_html(selected_side.upper())}")
+    lines.append("Pick an outcome below, then choose Buy or Sell to continue.")
+    return chr(10).join(lines)
+
+
+def _trade_keyboard_rows(candidate: dict[str, Any], *, view_key: str, selected_outcome_id: Optional[str] = None, selected_side: Optional[str] = None) -> list[list[Any]]:
+    market = candidate.get("market") if isinstance(candidate.get("market"), dict) else {}
+    outcomes = _trade_outcomes(market)
+    rows: list[list[Any]] = []
+    for index, outcome in enumerate(outcomes):
+        label = _truncate_text(outcome.get("label") or f"Outcome {index + 1}", 18)
+        rows.append([InlineKeyboardButton(label, callback_data=f"tradeo:{view_key}:{index}")])
+
+    if selected_outcome_id or selected_side:
+        rows.append([
+            InlineKeyboardButton("Buy", callback_data=f"trades:{view_key}:buy"),
+            InlineKeyboardButton("Sell", callback_data=f"trades:{view_key}:sell"),
+        ])
+    return rows
+
+
+def _trade_keyboard(context: Any, candidate: dict[str, Any], *, selected_outcome_id: Optional[str] = None, selected_side: Optional[str] = None, back_callback: Optional[str] = "watch:refresh") -> Any:
+    view_key = _trade_view_key(candidate)
+    bucket = _trade_view_bucket(context)
+    bucket[view_key] = {"candidate": candidate}
+    rows = _trade_keyboard_rows(candidate, view_key=view_key, selected_outcome_id=selected_outcome_id, selected_side=selected_side)
+    if back_callback:
+        rows.append([InlineKeyboardButton("Refresh list", callback_data=back_callback)])
+    return InlineKeyboardMarkup(rows) if rows else None
 
 
 def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -918,12 +1184,27 @@ def build_quote_command(client: BayseClient, text: str, context: Any = None) -> 
 def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     args = _split_args(text)
     active_candidate = _active_market_candidate(context)
+    selected_trade = _active_trade_selection(context)
     use_active_context = isinstance(active_candidate, dict) and bool(active_candidate.get("event_id")) and bool(active_candidate.get("market_id"))
+    outcome_text = ""
+    outcome_id = ""
 
-    if use_active_context and len(args) >= 4:
+    if use_active_context and selected_trade and len(args) >= 2:
         event_id = active_candidate["event_id"]
         market_id = active_candidate["market_id"]
-        outcome = args[0]
+        outcome_text = _first_string(selected_trade.get("outcome_label"), default="")
+        side = _normalize_text(selected_trade.get("side") or (args[2] if len(args) >= 3 else "")).lower()
+        try:
+            amount = float(args[0])
+        except ValueError:
+            return CommandResult(False, "What order do you want to place? Send amount and currency.")
+        currency = args[1].upper()
+        trailing = args[2:]
+        outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+    elif use_active_context and len(args) >= 4:
+        event_id = active_candidate["event_id"]
+        market_id = active_candidate["market_id"]
+        outcome_text = args[0]
         side = args[1]
         try:
             amount = float(args[2])
@@ -931,14 +1212,18 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
             return CommandResult(False, "What order do you want to place? Send outcome, buy|sell, amount, and currency.")
         currency = args[3].upper()
         trailing = args[4:]
+        outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     else:
         if len(args) < 6:
             if use_active_context:
-                return CommandResult(False, f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nWhat order do you want to place? Send outcome, buy|sell, amount, and currency.")
+                prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nWhat order do you want to place? Send outcome, buy|sell, amount, and currency."
+                if selected_trade:
+                    prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nSelected outcome: {_safe_html(selected_trade.get('outcome_label') or 'n/a')}\nWhat order do you want to place? Send amount and currency."
+                return CommandResult(False, prompt)
             return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
         event_id = args[0]
         market_id = args[1]
-        outcome = args[2]
+        outcome_text = args[2]
         side = args[3]
         try:
             amount = float(args[4])
@@ -946,14 +1231,16 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
             return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
         currency = args[5].upper()
         trailing = args[6:]
+        outcome_id = outcome_text
 
     price: Optional[float] = None
-    order_type = "LIMIT"
+    order_type = "MARKET"
 
     if trailing:
         trailing_value = trailing[0]
         try:
             price = float(trailing_value)
+            order_type = "LIMIT"
             if len(trailing) >= 2:
                 order_type = trailing[1].upper()
         except ValueError:
@@ -963,12 +1250,18 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
             if order_type == "MARKET":
                 price = None
 
+    if not outcome_id:
+        outcome_id = _resolve_order_outcome_id(active_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+    outcome_id = _normalize_text(outcome_id)
+    if not outcome_id:
+        return CommandResult(False, "I couldn’t determine the outcomeId for that trade. Pick an outcome from the event first and try again.")
+
     try:
         response = client.place_order(
             event_id,
             market_id,
-            outcome=outcome,
-            side=side,
+            outcome_id=outcome_id,
+            side=side.upper(),
             amount=amount,
             currency=currency,
             order_type=order_type,
@@ -1002,11 +1295,16 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     except (TypeError, ValueError):
         return CommandResult(False, "I couldn’t read the amount. Try something like ‘Buy, 700 NGN’.")
 
+    selected_trade = _active_trade_selection(context)
     currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or _smart_trade_currency(active_candidate)).upper()
     if not currency:
         currency = _smart_trade_currency(active_candidate)
 
-    outcome = _normalize_text(parsed.get("outcome") or ("YES" if side == "buy" else "NO")).upper()
+    outcome = _normalize_text(
+        parsed.get("outcome")
+        or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "")
+        or ("YES" if side == "buy" else "NO")
+    ).upper()
     if not outcome:
         outcome = "YES" if side == "buy" else "NO"
 
@@ -1015,6 +1313,7 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     if result.ok and isinstance(result.raw, dict):
         return CommandResult(result.ok, result.text, raw={**result.raw, "smart_trade": True, "smart_trade_source": text, "smart_trade_parsed": parsed})
     return result
+
 
 
 def build_events_command(client: BayseClient, text: str = "") -> CommandResult:
@@ -1653,7 +1952,7 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             return
 
         data = str(query.data)
-        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:") or data.startswith("more:")):
+        if not (data.startswith("watch:") or data.startswith("quote:") or data.startswith("fund:") or data.startswith("withdraw:") or data.startswith("more:") or data.startswith("tradeo:") or data.startswith("trades:")):
             return
 
         await query.answer()
@@ -1670,6 +1969,73 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             keyboard = _detail_keyboard(selected, back_callback=back_callback, view_more=False, back_label=back_label)
             await query.edit_message_text(str(detail.get("text") or ""), reply_markup=keyboard, parse_mode="HTML")
             return
+
+        if prefix in {"tradeo", "trades"}:
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await query.edit_message_text("That trade selection is no longer available.", parse_mode="HTML")
+                return
+            _, view_key, selected_value = parts
+            trade_view = _trade_view_bucket(context).get(view_key)
+            if not isinstance(trade_view, dict):
+                await query.edit_message_text("That trade selection is no longer available.", parse_mode="HTML")
+                return
+            candidate = trade_view.get("candidate") if isinstance(trade_view.get("candidate"), dict) else None
+            if not isinstance(candidate, dict):
+                await query.edit_message_text("That trade selection is no longer available.", parse_mode="HTML")
+                return
+
+            market = candidate.get("market") if isinstance(candidate.get("market"), dict) else {}
+            outcomes = _trade_outcomes(market)
+            if prefix == "tradeo":
+                try:
+                    outcome_index = int(selected_value)
+                except ValueError:
+                    await query.edit_message_text("Invalid outcome selection.", parse_mode="HTML")
+                    return
+                if outcome_index < 0 or outcome_index >= len(outcomes):
+                    await query.edit_message_text("That outcome selection is no longer available.", parse_mode="HTML")
+                    return
+                outcome = outcomes[outcome_index]
+                _set_active_market_context(context, candidate)
+                _set_trade_selection(context, candidate, outcome_id=_first_string(outcome.get("outcome_id"), default=""), outcome_label=_first_string(outcome.get("label"), default=""))
+                details = _trade_selection_text(candidate, selected_outcome_label=_first_string(outcome.get("label"), default=""))
+                preview, keyboard = _prepare_detail_view(
+                    context,
+                    prefix="watch",
+                    identifier=_first_string(candidate.get("event_id"), candidate.get("market_id"), default=view_key),
+                    full_text=details,
+                    back_callback="watch:refresh",
+                    back_label="Refresh list",
+                    extra_rows=_trade_keyboard_rows(candidate, view_key=view_key, selected_outcome_id=_first_string(outcome.get("outcome_id"), default="")),
+                )
+                await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
+                return
+
+            if prefix == "trades":
+                side = _normalize_text(selected_value).lower()
+                if side not in {"buy", "sell"}:
+                    await query.edit_message_text("Invalid trade side.", parse_mode="HTML")
+                    return
+                selected_trade = _active_trade_selection(context)
+                outcome_id = _first_string(selected_trade.get("outcome_id") if isinstance(selected_trade, dict) else "", default="")
+                outcome_label = _first_string(selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "", default="")
+                if not outcome_id:
+                    outcome_id = _resolve_order_outcome_id(candidate, side=side, selected_trade=selected_trade)
+                _set_active_market_context(context, candidate)
+                _set_trade_selection(context, candidate, outcome_id=outcome_id, outcome_label=outcome_label, side=side)
+                details = _trade_selection_text(candidate, selected_outcome_label=outcome_label, selected_side=side)
+                preview, keyboard = _prepare_detail_view(
+                    context,
+                    prefix="watch",
+                    identifier=_first_string(candidate.get("event_id"), candidate.get("market_id"), default=view_key),
+                    full_text=details,
+                    back_callback="watch:refresh",
+                    back_label="Refresh list",
+                    extra_rows=_trade_keyboard_rows(candidate, view_key=view_key, selected_outcome_id=outcome_id, selected_side=side),
+                )
+                await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
+                return
 
         if prefix == "quote":
             if selected == "refresh":
@@ -1760,20 +2126,33 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
         candidate = _candidate_from_event_market(event, markets[0]) if markets else None
         if candidate:
             _set_active_market_context(context, candidate)
+            _clear_trade_selection(context)
+            details = _trade_selection_text(candidate)
+            view_key = _trade_view_key(candidate)
+            _trade_view_bucket(context)[view_key] = {"candidate": candidate}
+            trade_rows = _trade_keyboard_rows(candidate, view_key=view_key)
+            preview, keyboard = _prepare_detail_view(
+                context,
+                prefix="watch",
+                identifier=_first_string(event.get("id"), event.get("eventId"), default=selected),
+                full_text=details,
+                back_callback="watch:refresh",
+                back_label="Refresh list",
+                extra_rows=trade_rows,
+            )
         else:
             context.user_data["active_event"] = event
             context.user_data["active_market"] = None
             context.user_data["active_market_candidate"] = None
-
-        details = _event_details_text(event, heading="Watching")
-        preview, keyboard = _prepare_detail_view(
-            context,
-            prefix="watch",
-            identifier=_first_string(event.get("id"), event.get("eventId"), default=selected),
-            full_text=details,
-            back_callback="watch:refresh",
-            back_label="Refresh list",
-        )
+            details = _event_details_text(event, heading="Watching")
+            preview, keyboard = _prepare_detail_view(
+                context,
+                prefix="watch",
+                identifier=_first_string(event.get("id"), event.get("eventId"), default=selected),
+                full_text=details,
+                back_callback="watch:refresh",
+                back_label="Refresh list",
+            )
         await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
         direction = _event_direction(event)
         if direction:

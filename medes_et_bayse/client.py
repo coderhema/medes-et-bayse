@@ -250,7 +250,7 @@ class BayseClient:
         event_id: str,
         market_id: str,
         *,
-        outcome: str,
+        outcome_id: str,
         side: str,
         amount: float,
         currency: str,
@@ -258,11 +258,11 @@ class BayseClient:
         price: Optional[float] = None,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {
-            "outcome": outcome,
-            "side": side,
+            "outcomeId": outcome_id,
+            "side": side.upper(),
             "amount": amount,
             "currency": currency,
-            "type": order_type,
+            "type": order_type.upper(),
         }
         if price is not None:
             body["price"] = price

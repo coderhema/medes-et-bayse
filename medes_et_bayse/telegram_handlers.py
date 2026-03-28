@@ -287,69 +287,156 @@ def _extract_collection(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _watchlist_text(events: list[dict[str, Any]]) -> str:
-    lines = ["<b>What do you want to watch?</b>"]
-    for index, event in enumerate(events, start=1):
-        emoji = _signal_emoji(_event_direction(event))
-        prefix = f"{emoji} " if emoji else ""
-        title = _event_title(event)
-        description = _event_description(event)
-        line = f"{index}. {prefix}<b>{_safe_html(title)}</b>"
-        if description:
-            line += f" — {_safe_html(description)}"
-        lines.append(line)
-    return "\n".join(lines)
+KNOWN_EVENT_CATEGORIES = {"sports", "crypto", "politics", "economy", "entertainment", "culture", "technology", "business", "music", "world"}
+QUOTE_STOP_WORDS = {"quote", "price", "prices", "ticker", "market", "markets", "the", "a", "an", "for", "of", "on", "about"}
+WATCH_STOP_WORDS = {"watch", "watchlist", "events", "event", "markets", "market", "monitor", "track", "follow", "list", "show", "active", "my"}
 
 
-def _watchlist_details(event: dict[str, Any]) -> str:
-    lines = [f"Watching: {_bold(_event_title(event))}"]
+def _is_uuid_like(value: Any) -> bool:
+    text = _normalize_text(value)
+    parts = text.split("-")
+    return len(text) == 36 and len(parts) == 5
+
+
+def _truncate_text(value: Any, limit: int = 44) -> str:
+    text = _normalize_text(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _search_term_after(text: str, stop_words: set[str]) -> str:
+    tokens = _split_args(text)
+    if tokens and tokens[0].startswith("/"):
+        tokens = tokens[1:]
+    filtered = [token for token in tokens if token.lower() not in stop_words]
+    return " ".join(filtered).strip(" .,:;!?")
+
+
+def _event_markets(event: dict[str, Any]) -> list[dict[str, Any]]:
+    markets = event.get("markets")
+    if isinstance(markets, list):
+        return [market for market in markets if isinstance(market, dict)]
+    if any(key in event for key in ("outcome1Price", "outcome2Price", "yesBuyPrice", "noBuyPrice")):
+        return [event]
+    return []
+
+
+def _event_currency_label(event: dict[str, Any]) -> str:
+    currencies = event.get("supportedCurrencies")
+    if isinstance(currencies, list) and currencies:
+        cleaned = [str(item).upper() for item in currencies if _normalize_text(item)]
+        if cleaned:
+            return ", ".join(cleaned)
+    return _first_string(event.get("currency"), default="USD").upper()
+
+
+def _market_yes_no_prices(market: dict[str, Any]) -> tuple[str, str]:
+    yes_price = _first_string(
+        _format_number(market.get("yesBuyPrice")),
+        _format_number(market.get("outcome1Price")),
+        _format_number(market.get("price")),
+        default="n/a",
+    )
+    no_price = _first_string(
+        _format_number(market.get("noBuyPrice")),
+        _format_number(market.get("outcome2Price")),
+        default="n/a",
+    )
+    return yes_price, no_price
+
+
+def _market_summary_line(market: dict[str, Any], *, prefix: str = "") -> str:
+    yes_price, no_price = _market_yes_no_prices(market)
+    title = _market_title(market)
+    line = f"{prefix}<b>{_safe_html(title)}</b>" if title else f"{prefix}<b>Market</b>"
+    line += f" — YES {_code(yes_price)} | NO {_code(no_price)}"
+    status = _first_string(market.get("status"), default="").lower()
+    if status:
+        line += f" | {_safe_html(status)}"
+    return line
+
+
+def _event_list_title(event: dict[str, Any]) -> str:
+    title = _event_title(event)
+    if not title or _is_uuid_like(title):
+        return "Untitled event"
+    return title
+
+
+def _event_summary_line(event: dict[str, Any], index: int) -> str:
+    emoji = _signal_emoji(_event_direction(event))
+    prefix = f"{emoji} " if emoji else ""
+    return f"{index}. {prefix}<b>{_safe_html(_event_list_title(event))}</b>"
+
+
+def _event_details_text(event: dict[str, Any], *, heading: str = "Selected event") -> str:
+    lines = [f"<b>{_safe_html(heading)}</b>: {_bold(_event_title(event))}"]
     description = _event_description(event)
     if description:
         lines.append(f"Details: {_safe_html(description)}")
-    direction = _event_direction(event)
-    if direction:
-        lines.append(f"Signal: {_signal_emoji(direction)} {_safe_html(direction)}".strip())
-    return "\n".join(lines)
+    category = _first_string(event.get("category"), default="")
+    if category:
+        lines.append(f"Category: {_safe_html(category)}")
+    status = _first_string(event.get("status"), default="")
+    if status:
+        lines.append(f"Status: {_safe_html(status)}")
+    currencies = _event_currency_label(event)
+    if currencies:
+        lines.append(f"Currencies: {_safe_html(currencies)}")
+    markets = _event_markets(event)
+    if markets:
+        lines.append("Markets:")
+        for idx, market in enumerate(markets, start=1):
+            lines.append(f"{idx}. {_market_summary_line(market)}")
+    else:
+        lines.append("Markets: no market data returned by Bayse.")
+    return chr(10).join(lines)
 
 
-def _should_suppress_debug_message(text: Any) -> bool:
-    normalized = _normalize_text(text).lower()
-    return any(phrase in normalized for phrase in DEBUG_SPAM_PHRASES)
+def _watchlist_text(events: list[dict[str, Any]]) -> str:
+    lines = ["<b>What do you want to watch?</b>"]
+    for index, event in enumerate(events, start=1):
+        lines.append(_event_summary_line(event, index))
+    return chr(10).join(lines)
 
 
-def _watch_category_from_text(text: str) -> Optional[str]:
-    normalized = _normalize_text(text).lower()
-    if not normalized.startswith("watch"):
-        return None
-    args = _split_args(text)
-    if len(args) >= 2 and args[0].lower() == "watch":
-        category = " ".join(args[1:]).strip(".,:;!?")
-        return category or None
-    return None
+def _events_text(events: list[dict[str, Any]], *, heading: str = "Active markets") -> str:
+    lines = [f"<b>{_safe_html(heading)}</b>"]
+    for index, event in enumerate(events, start=1):
+        lines.append(_event_summary_line(event, index))
+    return chr(10).join(lines)
 
 
-def _general_plain_text_response(text: str) -> CommandResult:
-    normalized = _normalize_text(text).lower()
-    if any(phrase in normalized for phrase in ("buy", "sell", "should i", "am i", "entry", "exit", "long", "short")):
-        return CommandResult(True, "\n".join([
-            "If you want buy/sell guidance, give me a market name or symbol.",
-            GENERAL_QUANT_GUIDANCE,
-            "I can also show a quote, watch a category, or list your portfolio.",
-        ]))
-    if normalized:
-        return CommandResult(True, "\n".join([
-            f"I read: {_safe_html(text)}",
-            "I can help with quotes, watchlists, balances, orders, and portfolio checks.",
-            "Try: watch crypto, quote BTC, /help",
-        ]))
-    return CommandResult(True, "I can help with quotes, watchlists, balances, orders, and portfolio checks. Try /help.")
+def _fund_text(asset: Optional[str]) -> str:
+    asset_label = (asset or "USD").upper()
+    return chr(10).join([
+        "<b>Funding options</b>",
+        f"Selected currency: {_safe_html(asset_label)}",
+        "Bayse docs show deposits are handled through mint shares on a market, while wallet assets show what is active for your account.",
+        "Use /fund USD or /fund NGN to see the matching wallet funding details.",
+        "Security: verify the asset, network, and destination before moving funds.",
+        "Supported currencies: USD and NGN.",
+    ])
+
+
+def _withdraw_text(asset: Optional[str]) -> str:
+    asset_label = (asset or "USD").upper()
+    return chr(10).join([
+        "<b>Withdrawal options</b>",
+        f"Selected currency: {_safe_html(asset_label)}",
+        "Bayse docs show withdrawals are handled through burning equal YES and NO shares on a market, plus wallet balances determine what you can move.",
+        "Use /withdraw USD or /withdraw NGN to see the matching wallet withdrawal details.",
+        "Security: only withdraw to details you control and recognize.",
+        "Supported currencies: USD and NGN.",
+    ])
 
 
 def _funding_asset_from_text(text: str) -> Optional[str]:
     normalized = _normalize_text(text).lower()
     if any(keyword in normalized for keyword in ("ngn", "naira", "cash", "local currency", "wallet")):
         return "NGN"
-    if any(keyword in normalized for keyword in ("usd", "usdt", "crypto", "stablecoin", "be p20", "bep20", "crypto wallet")):
+    if any(keyword in normalized for keyword in ("usd", "usdt", "crypto", "stablecoin", "bep20", "crypto wallet")):
         return "USD"
     return None
 
@@ -363,96 +450,259 @@ def _withdraw_asset_from_text(text: str) -> Optional[str]:
     return None
 
 
-def _fund_text(asset: Optional[str] = None) -> str:
-    lines = ["<b>Funding options</b>"]
-    if asset in {None, "NGN"}:
-        lines.extend([
-            "<b>NGN wallet</b>",
-            "Minimum deposit: <code>₦200</code>",
-            "Fee: <code>1%</code> deposit fee, minimum <code>₦5</code>, capped at <code>₦1,000</code>",
-            "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>Naira</b>, then follow the prompt to generate a unique virtual bank account.",
-            "Security: the deposit account is one-time use. Use the name that matches your verified account and check transaction history if the transfer is delayed.",
-        ])
-    if asset in {None, "USD"}:
-        if asset is None:
-            lines.append("")
-        lines.extend([
-            "<b>USD wallet</b>",
-            "Minimum deposit: <code>$1</code>",
-            "Network: <code>BEP20</code> only",
-            "Flow: open the app, tap <b>Add cash</b>, choose <b>Wallet</b>, select <b>USD</b>, then copy the wallet address or use the QR code.",
-            "Security: use the BEP20 network only. Sending on the wrong network may result in lost funds.",
-        ])
-    lines.append("If you want, I can show the matching withdrawal flow too.")
-    return "\n".join(lines)
+def _asset_row_text(asset: dict[str, Any]) -> str:
+    symbol = _first_string(asset.get("symbol"), default="n/a")
+    balance = _code(_format_number(asset.get("availableBalance")))
+    pending = _code(_format_number(asset.get("pendingBalance")))
+    deposit = _safe_html(asset.get("depositActivity") or "n/a")
+    withdraw = _safe_html(asset.get("withdrawalActivity") or "n/a")
+    network = _safe_html(asset.get("network") or "n/a")
+    lines = [f"<b>{_safe_html(symbol)}</b> — balance {balance} pending {pending}"]
+    lines.append(f"Network: {network} | deposit: {deposit} | withdrawal: {withdraw}")
+    addresses = asset.get("addresses") if isinstance(asset.get("addresses"), list) else []
+    if addresses:
+        for address in addresses:
+            addr = _first_string(address.get("address"), default="")
+            if addr:
+                lines.append(f"Deposit address: <code>{_safe_html(addr)}</code>")
+    return chr(10).join(lines)
 
 
-def _withdraw_text(asset: Optional[str] = None) -> str:
-    lines = ["<b>Withdrawal options</b>"]
-    if asset in {None, "NGN"}:
+def _wallet_assets_text(payload: Any, *, asset_filter: Optional[str] = None, purpose: str = "Funding") -> str:
+    assets: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        maybe_assets = payload.get("assets")
+        if isinstance(maybe_assets, list):
+            assets = [item for item in maybe_assets if isinstance(item, dict)]
+    elif isinstance(payload, list):
+        assets = [item for item in payload if isinstance(item, dict)]
+
+    if asset_filter:
+        filtered = []
+        for asset in assets:
+            symbol = _first_string(asset.get("symbol")).upper()
+            if symbol == asset_filter.upper():
+                filtered.append(asset)
+        assets = filtered or assets
+
+    lines = [f"<b>{_safe_html(purpose)}</b>"]
+    if not assets:
+        lines.append("No wallet assets were returned by Bayse.")
+        return chr(10).join(lines)
+
+    for asset in assets:
+        lines.append(_asset_row_text(asset))
+        lines.append("")
+
+    if purpose.lower().startswith("fund"):
         lines.extend([
-            "<b>NGN withdrawal</b>",
-            "Minimum withdrawal: <code>₦500</code>",
-            "Fee: flat <code>₦20</code>",
-            "Flow: open <b>Wallet</b>, tap <b>Withdraw</b>, then enter your bank account details.",
-            "Security: withdrawals must go to a bank account that matches your verified Bayse name. KYC is required.",
+            "Security: verify the deposit address, asset symbol, and network before sending funds.",
+            "Bayse docs show supported currencies include USD and NGN.",
         ])
-    if asset in {None, "USD"}:
-        if asset is None:
-            lines.append("")
+    else:
         lines.extend([
-            "<b>USD withdrawal</b>",
-            "Minimum withdrawal: <code>$1</code>",
-            "Flow: open <b>Wallet</b>, tap <b>Withdraw</b>, then enter your crypto wallet address.",
-            "Security: confirm the address and network carefully. Network fees may apply.",
+            "Security: withdrawals should only be sent to addresses or bank details you control and recognize.",
+            "If withdrawal activity is SUSPENDED, check KYC and account status in the app.",
         ])
-    lines.append("Withdrawals usually process instantly or within a few hours, depending on the route and verification status.")
-    return "\n".join(lines)
+    return chr(10).join(lines).strip()
 
 
-def build_fund_command(text: str = "") -> CommandResult:
+def _quote_candidate_label(candidate: dict[str, Any]) -> str:
+    event_title = _truncate_text(candidate.get("event_title") or candidate.get("eventTitle") or candidate.get("event"), 28)
+    market_title = _truncate_text(candidate.get("market_title") or candidate.get("marketTitle") or candidate.get("market"), 24)
+    yes_price = _format_number(candidate.get("yes_price"))
+    no_price = _format_number(candidate.get("no_price"))
+    return _truncate_text(f"{event_title} · {market_title} YES {yes_price} / NO {no_price}", 58)
+
+
+def _quote_candidates_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for event in events:
+        markets = _event_markets(event)
+        event_title = _event_title(event)
+        for market in markets:
+            yes_price, no_price = _market_yes_no_prices(market)
+            candidates.append({
+                "event": event,
+                "market": market,
+                "event_title": event_title,
+                "market_title": _market_title(market),
+                "yes_price": yes_price,
+                "no_price": no_price,
+                "event_id": _first_string(event.get("id"), event.get("eventId"), default=""),
+                "market_id": _first_string(market.get("id"), market.get("marketId"), default=""),
+                "outcome1_id": _first_string(market.get("outcome1Id"), default=""),
+                "outcome2_id": _first_string(market.get("outcome2Id"), default=""),
+                "currency": _event_currency_label(event),
+                "status": _first_string(market.get("status"), event.get("status"), default=""),
+            })
+    return candidates
+
+
+def _quote_keyboard(candidates: list[dict[str, Any]]) -> Any:
+    rows = []
+    for index, candidate in enumerate(candidates[:10]):
+        rows.append([InlineKeyboardButton(_quote_candidate_label(candidate), callback_data=f"quote:{index}")])
+    if rows:
+        rows.append([InlineKeyboardButton("Refresh search", callback_data="quote:refresh")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _watchlist_keyboard(events: list[dict[str, Any]]) -> Any:
+    rows = []
+    for event in events[:10]:
+        rows.append([InlineKeyboardButton(_truncate_text(_event_title(event), 52), callback_data=f"watch:{_first_string(event.get('id'), event.get('eventId'), default='')}")])
+    if rows:
+        rows.append([InlineKeyboardButton("Refresh list", callback_data="watch:refresh")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _quote_search_text(term: str, candidates: list[dict[str, Any]]) -> str:
+    lines = [f"<b>Select a market for</b> {_bold(term)}"]
+    for index, candidate in enumerate(candidates[:10], start=1):
+        lines.append(f"{index}. {_quote_candidate_label(candidate)}")
+    lines.append("Choose the matching market below, and I’ll set it as the active context.")
+    return chr(10).join(lines)
+
+
+def _quote_deductions_text(candidate: dict[str, Any]) -> str:
+    yes_price = candidate.get("yes_price")
+    no_price = candidate.get("no_price")
+    try:
+        yes_num = float(yes_price)
+    except (TypeError, ValueError):
+        yes_num = None
+    try:
+        no_num = float(no_price)
+    except (TypeError, ValueError):
+        no_num = None
+
+    lines = ["<b>Deductions</b>"]
+    lines.append(f"YES price: {_code(_format_number(yes_num))}")
+    lines.append(f"NO price: {_code(_format_number(no_num))}")
+
+    if yes_num is not None and no_num is not None:
+        if yes_num >= 0.7:
+            lines.append("Bias: YES is crowded. Best move bias is sell YES, buy NO, or switch if your thesis is weaker.")
+        elif yes_num <= 0.3:
+            lines.append("Bias: NO is crowded. Best move bias is sell NO, buy YES, or switch if the setup changes.")
+        else:
+            lines.append("Bias: balanced. Best move bias is wait, size small, and avoid forcing an entry.")
+    else:
+        lines.append("Bias: price data is incomplete, so wait for a cleaner read before acting.")
+
+    currency = _first_string(candidate.get("currency"), default="USD").upper()
+    lines.append(f"Currency context: {_safe_html(currency)}")
+    return chr(10).join(lines)
+
+
+def _quant_monitor_text(candidate: dict[str, Any]) -> str:
+    yes_price = candidate.get("yes_price")
+    no_price = candidate.get("no_price")
+    try:
+        yes_num = float(yes_price)
+    except (TypeError, ValueError):
+        yes_num = None
+    try:
+        no_num = float(no_price)
+    except (TypeError, ValueError):
+        no_num = None
+
+    if yes_num is not None and no_num is not None:
+        if yes_num >= 0.7:
+            action = "sell YES / buy NO / switch if you need to reduce risk"
+        elif yes_num <= 0.3:
+            action = "buy YES / sell NO / switch if your thesis improved"
+        else:
+            action = "wait, scale smaller, or switch when a stronger edge appears"
+    else:
+        action = "wait until the price feed is complete"
+
+    return chr(10).join([
+        "<b>Quant monitor</b>",
+        f"Active context: {_safe_html(candidate.get('event_title') or '')} · {_safe_html(candidate.get('market_title') or '')}",
+        f"Best move bias: {_safe_html(action)}",
+        "Monitor rule: reassess if YES/NO drifts sharply, spread widens, or liquidity dries up.",
+        "Monitor state saved so future alerts can reuse the same market context.",
+    ])
+
+
+def _selected_quote_text(candidate: dict[str, Any], quote_response: Optional[QuoteResponse] = None) -> str:
+    event = candidate.get("event") if isinstance(candidate.get("event"), dict) else {}
+    market = candidate.get("market") if isinstance(candidate.get("market"), dict) else {}
+    lines = [f"<b>Active market</b>: {_bold(candidate.get('event_title') or _event_title(event))}"]
+    lines.append(f"Market: {_bold(candidate.get('market_title') or _market_title(market))}")
+    if quote_response is not None:
+        lines.append(f"Live quote bid: {_code(_format_number(quote_response.quote.bid))} ask: {_code(_format_number(quote_response.quote.ask))}")
+        lines.append(f"Last: {_code(_format_number(quote_response.quote.last))} midpoint: {_code(_format_number(quote_response.quote.midpoint))}")
+    lines.append(_quote_deductions_text(candidate))
+    lines.append(_quant_monitor_text(candidate))
+    return chr(10).join(lines)
+
+
+def build_fund_command(client: Optional[BayseClient] = None, text: str = "") -> CommandResult:
     asset = _funding_asset_from_text(text)
     if asset is None and _normalize_text(text):
         return CommandResult(False, "Usage: /fund [NGN|USD]")
-    return CommandResult(True, _fund_text(asset))
-
-
-def build_withdraw_command(text: str = "") -> CommandResult:
-    asset = _withdraw_asset_from_text(text)
-    if asset is None and _normalize_text(text):
-        return CommandResult(False, "Usage: /withdraw [NGN|USD]")
-    return CommandResult(True, _withdraw_text(asset))
-
-
-def build_quote_command(client: BayseClient, text: str) -> CommandResult:
-    args = _split_args(text)
-    if not args:
-        return CommandResult(False, "Usage: /quote <market name or symbol>")
-    term = args[0]
+    if client is None:
+        return CommandResult(True, _fund_text(asset))
     try:
-        response = client.search_events(term, page=1, size=WATCHLIST_PAGE_SIZE, params={"status": "open"})
-        events = _extract_collection(response)
-        candidates = []
-        for event in events:
-            markets = _extract_collection(event.get("markets") or [])
-            event_title = _event_title(event)
-            for market in markets:
-                candidates.append({
-                    "event": event,
-                    "market": market,
-                    "event_title": event_title,
-                    "market_title": _market_title(market),
-                    "yes_price": _first_string(market.get("yes_price"), market.get("yesPrice"), market.get("yes"), default="n/a"),
-                    "no_price": _first_string(market.get("no_price"), market.get("noPrice"), market.get("no"), default="n/a"),
-                })
-        if not candidates:
-            return CommandResult(False, "No matching markets were returned by Bayse.")
-        raw = {"mode": "quote", "term": term, "events": events, "quote_candidates": candidates, "payload": response}
-        return CommandResult(True, _quote_search_text(term, candidates), raw=raw)
+        payload = client.get_assets()
+        return CommandResult(True, _wallet_assets_text(payload, asset_filter=asset, purpose="Funding"), raw=payload)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
     except Exception as exc:
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
+
+
+def build_withdraw_command(client: Optional[BayseClient] = None, text: str = "") -> CommandResult:
+    asset = _withdraw_asset_from_text(text)
+    if asset is None and _normalize_text(text):
+        return CommandResult(False, "Usage: /withdraw [NGN|USD]")
+    if client is None:
+        return CommandResult(True, _withdraw_text(asset))
+    try:
+        payload = client.get_assets()
+        return CommandResult(True, _wallet_assets_text(payload, asset_filter=asset, purpose="Withdrawal"), raw=payload)
+    except BayseClientError as exc:
+        return CommandResult(False, _error_text(exc))
+    except Exception as exc:
+        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
+
+
+def build_quote_command(client: BayseClient, text: str) -> CommandResult:
+    term = _search_term_after(text, QUOTE_STOP_WORDS)
+    if not term:
+        return CommandResult(False, "Usage: /quote <market name or symbol>")
+
+    payload: Any = None
+    if _is_uuid_like(term):
+        try:
+            payload = client.get_event(term)
+        except BayseClientError:
+            payload = None
+        except Exception:
+            payload = None
+
+    if payload is None:
+        try:
+            payload = client.search_events(term, page=1, size=WATCHLIST_PAGE_SIZE, params={"status": "open"})
+        except BayseClientError as exc:
+            return CommandResult(False, _error_text(exc))
+        except Exception as exc:
+            return CommandResult(False, f"Bayse API error\nmessage: {exc}")
+
+    if isinstance(payload, dict) and isinstance(payload.get("markets"), list):
+        events = [payload]
+    else:
+        events = _extract_collection(payload)
+
+    candidates = _quote_candidates_from_events(events)
+    if not candidates:
+        return CommandResult(False, "No matching markets were returned by Bayse.")
+
+    raw = {"mode": "quote", "term": term, "events": events, "quote_candidates": candidates, "payload": payload}
+    return CommandResult(True, _quote_search_text(term, candidates), raw=raw)
 
 
 def build_order_command(client: BayseClient, text: str) -> CommandResult:
@@ -505,18 +755,52 @@ def build_order_command(client: BayseClient, text: str) -> CommandResult:
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 
-def build_watchlist_command(client: BayseClient, text: str = "") -> CommandResult:
+def build_events_command(client: BayseClient, text: str = "") -> CommandResult:
+    term = _search_term_after(text, WATCH_STOP_WORDS)
+    params: dict[str, Any] = {"status": "open"}
+    heading = "Active markets"
+    if term:
+        heading = f"Search results for {_normalize_text(term)}"
+        if term.lower() in KNOWN_EVENT_CATEGORIES:
+            params = {"category": term.lower(), "status": "open"}
+        else:
+            params = {"keyword": term, "status": "open"}
     try:
-        category = _watch_category_from_text(text)
-        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params={"category": category} if category else None)
+        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params=params)
         events = _extract_collection(payload)
         if not events:
             return CommandResult(False, "No markets or events were returned by Bayse.")
-        raw = {"events": events, "payload": payload, "category": category}
-        heading = _watchlist_text(events)
-        if category:
-            heading = "\n".join([f"<b>Watching category:</b> {_safe_html(category)}", heading])
-        return CommandResult(True, heading, raw=raw)
+        raw = {"mode": "events", "term": term, "events": events, "payload": payload, "params": params}
+        return CommandResult(True, _events_text(events, heading=heading), raw=raw)
+    except BayseClientError as exc:
+        return CommandResult(False, _error_text(exc))
+    except Exception as exc:
+        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
+
+
+def build_watchlist_command(client: BayseClient, text: str = "") -> CommandResult:
+    term = _search_term_after(text, WATCH_STOP_WORDS)
+    params: dict[str, Any]
+    heading = "Watchlist"
+    if term:
+        heading = f"Watch results for {_normalize_text(term)}"
+        if term.lower() in KNOWN_EVENT_CATEGORIES:
+            params = {"category": term.lower()}
+        else:
+            params = {"keyword": term}
+    else:
+        params = {"watchlist": True}
+    try:
+        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params=params)
+        events = _extract_collection(payload)
+        if not events and not term:
+            payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params={"status": "open"})
+            events = _extract_collection(payload)
+            heading = "Active markets"
+        if not events:
+            return CommandResult(False, "No markets or events were returned by Bayse.")
+        raw = {"mode": "watch", "term": term, "events": events, "payload": payload, "params": params}
+        return CommandResult(True, _events_text(events, heading=heading), raw=raw)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
     except Exception as exc:
@@ -641,9 +925,14 @@ def _order_scenario_from_result(result: CommandResult) -> Optional[str]:
     return None
 
 
+def _looks_like_events_intent(text: str) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(keyword in normalized for keyword in ("show events", "events", "active markets", "list markets", "market list", "market events"))
+
+
 def _looks_like_watch_intent(text: str) -> bool:
     normalized = _normalize_text(text).lower()
-    return any(keyword in normalized for keyword in ("watch", "watchlist", "monitor", "track", "follow", "list markets", "active markets", "market events", "economy trades", "trades"))
+    return any(keyword in normalized for keyword in ("watch", "watchlist", "monitor", "track", "follow", "economy trades", "trades"))
 
 
 def _looks_like_balance_intent(text: str) -> bool:
@@ -679,6 +968,10 @@ def _looks_like_quote_intent(text: str) -> bool:
 def build_natural_language_command(client: BayseClient, text: str) -> CommandResult:
     if not _normalize_text(text):
         return _general_plain_text_response(text)
+    if _looks_like_quote_intent(text):
+        return build_quote_command(client, text)
+    if _looks_like_events_intent(text):
+        return build_events_command(client, text)
     if _looks_like_watch_intent(text):
         return build_watchlist_command(client, text)
     if _looks_like_balance_intent(text):
@@ -686,19 +979,11 @@ def build_natural_language_command(client: BayseClient, text: str) -> CommandRes
     if _looks_like_portfolio_intent(text):
         return build_portfolio_command(client)
     if _looks_like_fund_intent(text):
-        return build_fund_command(text)
+        return build_fund_command(text=text)
     if _looks_like_withdraw_intent(text):
-        return build_withdraw_command(text)
+        return build_withdraw_command(text=text)
     if _looks_like_help_intent(text):
         return build_help_command()
-    if _looks_like_quote_intent(text):
-        args = _split_args(text)
-        if args and args[0].startswith('/'):
-            args = args[1:]
-        symbol = next((token for token in args if token.lower() not in {'quote', 'price', 'ticker', 'of', 'for', 'the', 'a'}), None)
-        if symbol:
-            return build_quote_command(client, f"/quote {symbol}")
-        return CommandResult(False, "Say a market name or symbol after quote, for example: quote BTC")
     return _general_plain_text_response(text)
 
 
@@ -759,9 +1044,20 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text, parse_mode="HTML")
             return
+        if result.raw and isinstance(result.raw, dict) and result.raw.get("quote_candidates"):
+            candidates = result.raw.get("quote_candidates", [])
+            context.user_data["quote_candidates"] = candidates
+            context.user_data["quote_search_term"] = result.raw.get("term")
+            context.user_data.pop("active_event", None)
+            context.user_data.pop("active_market", None)
+            print(json.dumps({"telegram": "text_routed", "route": "quote_search", "text": text}, ensure_ascii=False), flush=True)
+            await message.reply_text(result.text, reply_markup=_quote_keyboard(candidates), parse_mode="HTML")
+            return
         if result.raw and isinstance(result.raw, dict) and result.raw.get("events"):
             events = result.raw.get("events", [])
-            print(json.dumps({"telegram": "text_routed", "route": "watchlist", "text": text}, ensure_ascii=False), flush=True)
+            route = str(result.raw.get("mode") or "watchlist")
+            context.user_data["watch_query"] = text
+            print(json.dumps({"telegram": "text_routed", "route": route, "text": text}, ensure_ascii=False), flush=True)
             await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
             return
         print(json.dumps({"telegram": "text_routed", "route": "general", "text": text}, ensure_ascii=False), flush=True)
@@ -770,25 +1066,25 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
     return handler
 
 
-def fund_handler_factory() -> Callable[[Any, Any], Any]:
+def fund_handler_factory(client: Optional[BayseClient] = None) -> Callable[[Any, Any], Any]:
     async def handler(update: Any, context: Any) -> None:
         message = getattr(update, "effective_message", None) or getattr(update, "message", None)
         if message is None:
             return
         text = getattr(message, "text", "") or ""
-        result = build_fund_command(text)
+        result = build_fund_command(client, text=text)
         await message.reply_text(result.text, parse_mode="HTML")
 
     return handler
 
 
-def withdraw_handler_factory() -> Callable[[Any, Any], Any]:
+def withdraw_handler_factory(client: Optional[BayseClient] = None) -> Callable[[Any, Any], Any]:
     async def handler(update: Any, context: Any) -> None:
         message = getattr(update, "effective_message", None) or getattr(update, "message", None)
         if message is None:
             return
         text = getattr(message, "text", "") or ""
-        result = build_withdraw_command(text)
+        result = build_withdraw_command(client, text=text)
         await message.reply_text(result.text, parse_mode="HTML")
 
     return handler
@@ -802,6 +1098,12 @@ def quote_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         text = getattr(message, "text", "") or ""
         result = build_quote_command(client, text)
         if _should_suppress_debug_message(result.text):
+            return
+        candidates = result.raw.get("quote_candidates", []) if result.raw else []
+        if candidates:
+            context.user_data["quote_candidates"] = candidates
+            context.user_data["quote_search_term"] = result.raw.get("term") if result.raw else None
+            await message.reply_text(result.text, reply_markup=_quote_keyboard(candidates), parse_mode="HTML")
             return
         await message.reply_text(result.text, parse_mode="HTML")
 
@@ -830,7 +1132,25 @@ def watchlist_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         message = getattr(update, "effective_message", None) or getattr(update, "message", None)
         if message is None:
             return
-        result = build_watchlist_command(client)
+        text = getattr(message, "text", "") or ""
+        result = build_watchlist_command(client, text=text)
+        if not result.ok:
+            await message.reply_text(result.text, parse_mode="HTML")
+            return
+        events = result.raw.get("events", []) if result.raw else []
+        context.user_data["watch_query"] = text
+        await message.reply_text(result.text, reply_markup=_watchlist_keyboard(events), parse_mode="HTML")
+
+    return handler
+
+
+def events_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
+    async def handler(update: Any, context: Any) -> None:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message is None:
+            return
+        text = getattr(message, "text", "") or ""
+        result = build_events_command(client, text=text)
         if not result.ok:
             await message.reply_text(result.text, parse_mode="HTML")
             return
@@ -847,13 +1167,60 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
             return
 
         data = str(query.data)
-        if not data.startswith("watch:"):
+        if not (data.startswith("watch:") or data.startswith("quote:")):
             return
 
         await query.answer()
-        selected = data.split(":", 1)[1]
+        prefix, selected = data.split(":", 1)
+
+        if prefix == "quote":
+            if selected == "refresh":
+                term = context.user_data.get("quote_search_term")
+                if not term:
+                    await query.edit_message_text("No quote search is active yet.", parse_mode="HTML")
+                    return
+                result = build_quote_command(client, f"quote {term}")
+                if not result.ok:
+                    await query.edit_message_text(result.text, parse_mode="HTML")
+                    return
+                candidates = result.raw.get("quote_candidates", []) if result.raw else []
+                context.user_data["quote_candidates"] = candidates
+                context.user_data["quote_search_term"] = term
+                await query.edit_message_text(result.text, reply_markup=_quote_keyboard(candidates), parse_mode="HTML")
+                return
+
+            try:
+                index = int(selected)
+            except ValueError:
+                await query.edit_message_text("Invalid quote selection.", parse_mode="HTML")
+                return
+
+            candidates = context.user_data.get("quote_candidates", []) or []
+            if index < 0 or index >= len(candidates):
+                await query.edit_message_text("That quote selection is no longer available.", parse_mode="HTML")
+                return
+
+            candidate = candidates[index]
+            context.user_data["active_event"] = candidate.get("event")
+            context.user_data["active_market"] = candidate.get("market")
+            context.user_data["active_quote"] = candidate
+
+            quote_response = None
+            market_id = candidate.get("market_id")
+            if market_id:
+                try:
+                    quote_payload = client.get_ticker(market_id)
+                    quote_response = QuoteResponse.from_dict(quote_payload)
+                except Exception:
+                    quote_response = None
+
+            details = _selected_quote_text(candidate, quote_response)
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Back to search", callback_data="quote:refresh")]])
+            await query.edit_message_text(details, reply_markup=keyboard, parse_mode="HTML")
+            return
+
         if selected == "refresh":
-            result = build_watchlist_command(client)
+            result = build_watchlist_command(client, text=context.user_data.get("watch_query", ""))
             if not result.ok:
                 await query.edit_message_text(result.text, parse_mode="HTML")
                 return
@@ -877,8 +1244,11 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
 
         context.user_data["watchlist_event_id"] = selected
         context.user_data["watchlist_event"] = event
+        context.user_data["active_event"] = event
+        markets = _event_markets(event)
+        context.user_data["active_market"] = markets[0] if markets else None
 
-        details = _watchlist_details(event)
+        details = _event_details_text(event, heading="Watching")
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Refresh list", callback_data="watch:refresh")]])
         await query.edit_message_text(details, reply_markup=keyboard, parse_mode="HTML")
         direction = _event_direction(event)

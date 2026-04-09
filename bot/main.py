@@ -14,6 +14,7 @@ from loguru import logger
 
 from bot.bayse_client import BayseClient
 from bot.poke_client import PokeClient
+from bot.realtime_feed import QuoteManager
 from bot.strategies.arbitrage import ArbitrageStrategy
 from bot.strategies.kelly import KellyStrategy
 from bot.strategies.market_maker import MarketMakerStrategy
@@ -43,6 +44,38 @@ def _parse_timestamp(value: str) -> datetime:
         return datetime.fromisoformat(cleaned)
     except ValueError:
         return datetime.now(timezone.utc)
+
+
+def _market_id_from_event(event: dict) -> str:
+    return str(event.get("marketId") or event.get("market_id") or event.get("id") or "").strip()
+
+
+def _attach_live_quotes(events: list[dict], quote_manager: Optional[QuoteManager]) -> None:
+    if quote_manager is None:
+        return
+    snapshot = quote_manager.snapshot()
+    if not snapshot:
+        return
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        market_id = _market_id_from_event(event)
+        if not market_id:
+            continue
+        update = snapshot.get(market_id)
+        if update is None:
+            continue
+        event["liveQuote"] = {
+            "market_id": update.market_id,
+            "event_id": update.event_id,
+            "bid": update.bid,
+            "ask": update.ask,
+            "last": update.last,
+            "midpoint": update.midpoint,
+            "timestamp": update.timestamp,
+            "source": update.source,
+        }
+        event["liveQuoteAgeSeconds"] = quote_manager.quote_age_seconds(market_id)
 
 
 def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
@@ -110,11 +143,16 @@ def run_cycle(
     strategies: list,
     dry_run: bool = True,
     bayse_user_id: str = "",
+    quote_manager: Optional[QuoteManager] = None,
 ) -> None:
     logger.info("Starting trading cycle...")
 
     events = client.get_open_events(page=1, size=50)
     logger.info(f"Fetched {len(events)} open markets")
+    if quote_manager is not None:
+        quote_manager.sync_markets(events)
+        _attach_live_quotes(events, quote_manager)
+        logger.info(f"Realtime quote manager tracking {len(quote_manager.snapshot())} market(s)")
 
     all_signals = []
     for strategy in strategies:
@@ -246,6 +284,7 @@ def main():
         logger.warning("BAYSE_USER_ID is not set.")
 
     client = BayseClient(public_key=bayse_public_key, secret_key=bayse_secret_key, base_url=bayse_base_url)
+    quote_manager = QuoteManager(client, websocket_url=_env("BAYSE_WS_URL", "BAYSE_WEBSOCKET_URL"), poll_interval=float(os.getenv("QUOTE_POLL_INTERVAL_SECONDS", "10")))
 
     telegram_handler = None
     if build_telegram_handler_from_env:
@@ -271,6 +310,10 @@ def main():
 
     strategies = strategy_map[args.strategy]
 
+    if not args.scan_only:
+        quote_manager.start()
+        logger.info("Realtime quote management enabled")
+
     if not args.once and not args.scan_only:
         stop_event = threading.Event()
         if telegram_handler:
@@ -280,15 +323,17 @@ def main():
         try:
             while True:
                 try:
-                    run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
+                    run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager)
                 except Exception as e:
                     logger.error(f"Cycle error: {e}")
                     _notify(poke, f"medes-et-bayse ERROR: {e}", level="error")
                 time.sleep(poll_interval)
         except KeyboardInterrupt:
             stop_event.set()
+            quote_manager.stop()
     else:
-        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id)
+        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager)
+        quote_manager.stop()
 
 
 if __name__ == "__main__":

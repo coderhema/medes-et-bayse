@@ -748,29 +748,17 @@ class TelegramHandler:
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "<b>Commands</b>
-"
-            "/status — bot status
-"
-            "/balance — wallet balances
-"
-            "/portfolio — open positions
-"
-            "/events — active markets
-"
-            "/markets — search open markets by keyword
-"
-            "/quote — price quote before an order
-"
-            "/order — place a Bayse order
-"
-            "You can also say things like 'show me events' or 'is there any bitcoin market'.
-
-"
-            "Examples:
-"
-            "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD
-"
+            "<b>Commands</b>\n"
+            "/status — bot status\n"
+            "/balance — wallet balances\n"
+            "/portfolio — open positions\n"
+            "/events — active markets\n"
+            "/markets — search open markets by keyword\n"
+            "/quote — price quote before an order\n"
+            "/order — place a Bayse order\n"
+            "You can also say things like 'show me events' or 'is there any bitcoin market'.\n\n"
+            "Examples:\n"
+            "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD\n"
             "/order event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 type=MARKET currency=USD",
             parse_mode="HTML",
         )

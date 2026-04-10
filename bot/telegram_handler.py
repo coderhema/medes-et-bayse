@@ -645,11 +645,9 @@ class TelegramHandler:
                             market_title = market.get("title") or market.get("name") or market.get("label") or market.get("id") or "Untitled market"
                             matched_markets.append(str(market_title))
 
-                line = f"• {title}
-  id: {event_id or 'unknown'}"
+                line = f"• {title}\n  id: {event_id or 'unknown'}"
                 if query_terms and matched_markets:
-                    line += f"
-  matching markets: {', '.join(matched_markets[:3])}"
+                    line += f"\n  matching markets: {', '.join(matched_markets[:3])}"
                 lines.append(line)
                 if event_id:
                     rows.append([InlineKeyboardButton(str(title), callback_data=f"event:{event_id}")])
@@ -671,8 +669,7 @@ class TelegramHandler:
             else "Here are the open markets I found:"
         )
         if total_matches > len(lines):
-            header += f"
-Showing the first {len(lines)} results."
+            header += f"\nShowing the first {len(lines)} results."
         return header + "
 " + "
 ".join(lines), InlineKeyboardMarkup(rows) if rows else None

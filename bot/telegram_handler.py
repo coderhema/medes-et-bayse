@@ -330,16 +330,47 @@ class TelegramHandler:
             lines.append(f"• {title}\n  id: {event_id}\n  status: {status}")
         return "\n".join(lines)
 
-    def _format_balance(self, assets: list[dict]) -> str:
+    def _balance_assets(self, payload) -> list[dict]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if isinstance(payload, dict):
+            collected: list[dict] = []
+            for key in ("assets", "balances", "walletAssets", "wallet_assets", "data", "result", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    collected.extend(item for item in value if isinstance(item, dict))
+                elif isinstance(value, dict):
+                    collected.extend(item for item in value.values() if isinstance(item, dict))
+            if collected:
+                return collected
+            return [payload]
+        return []
+
+    def _format_balance(self, payload) -> str:
+        assets = self._balance_assets(payload)
         if not assets:
             return "No wallet assets found."
+
         lines = []
+        total_available = 0.0
+        total_pending = 0.0
+        summary_seen = False
         for asset in assets:
-            symbol = asset.get("symbol", "?")
-            available = self._fmt_money(asset.get("availableBalance", 0))
-            pending = self._fmt_money(asset.get("pendingBalance", 0))
+            symbol = asset.get("symbol") or asset.get("currency") or asset.get("asset") or "?"
+            available_raw = asset.get("availableBalance", asset.get("available", asset.get("balance", 0)))
+            pending_raw = asset.get("pendingBalance", asset.get("pending", 0))
+            try:
+                total_available += float(available_raw or 0)
+                total_pending += float(pending_raw or 0)
+                summary_seen = True
+            except Exception:
+                pass
             network = asset.get("network", "n/a")
-            lines.append(f"• {symbol}: available {available}, pending {pending} ({network})")
+            lines.append(f"• {symbol}: available {self._fmt_money(available_raw)}, pending {self._fmt_money(pending_raw)} ({network})")
+
+        if summary_seen and len(assets) > 1:
+            lines.append(f"Total available: {self._fmt_money(total_available)}")
+            lines.append(f"Total pending: {self._fmt_money(total_pending)}")
         return "\n".join(lines)
 
     def _format_portfolio(self, portfolio) -> str:
@@ -393,6 +424,40 @@ class TelegramHandler:
             f"Fee: {float(quote.get('fee', 0)):.2f}\n"
             f"Complete fill: {bool(quote.get('completeFill', False))}"
         )
+
+    def _resolve_trade_target(self, context: Any, event_id: str, market_id: str) -> tuple[str, str]:
+        event_id = _normalize_text(event_id)
+        market_id = _normalize_text(market_id)
+        active = self._normalize_trade_context(context)
+        if not event_id:
+            event_id = _normalize_text(active.get("event_id") or active.get("eventId"))
+        if not market_id:
+            market_id = _normalize_text(active.get("market_id") or active.get("marketId"))
+
+        ud = getattr(context, "user_data", {})
+        cache = ud.get("_event_cache") if isinstance(ud, dict) else {}
+        if market_id and isinstance(cache, dict):
+            for cached_event in cache.values():
+                if not isinstance(cached_event, dict):
+                    continue
+                cached_event_id = _normalize_text(cached_event.get("id") or cached_event.get("eventId"))
+                for market in self._event_markets(cached_event):
+                    cached_market_id = _normalize_text(market.get("id") or market.get("marketId"))
+                    if cached_market_id == market_id:
+                        return cached_event_id or event_id, market_id
+                    nested_event = market.get("event")
+                    if isinstance(nested_event, dict):
+                        nested_event_id = _normalize_text(nested_event.get("id") or nested_event.get("eventId"))
+                        if nested_event_id and cached_market_id == market_id:
+                            return nested_event_id, market_id
+        if event_id and not market_id and isinstance(cache, dict):
+            cached_event = cache.get(event_id)
+            if isinstance(cached_event, dict):
+                markets = self._event_markets(cached_event)
+                if markets:
+                    first_market = markets[0]
+                    market_id = _normalize_text(first_market.get("id") or first_market.get("marketId"))
+        return event_id, market_id
 
     @staticmethod
     def _format_order(result: dict) -> str:
@@ -562,6 +627,14 @@ class TelegramHandler:
             await update.message.reply_text(self._usage_order(), parse_mode="HTML")
             return
 
+        event_id, market_id = self._resolve_trade_target(context, event_id, market_id)
+        if not event_id or not market_id:
+            await update.message.reply_text(
+                "I couldn’t resolve the event and market IDs for that order. Open the market with /events or /quote first.",
+                parse_mode="HTML",
+            )
+            return
+
         try:
             amount = float(amount_raw)
             price = float(price_raw) if price_raw else None
@@ -612,7 +685,8 @@ class TelegramHandler:
                 return
             amount = float(amount_match.group(1))
             active = self._normalize_trade_context(context)
-            if not all(active.get(k) for k in ("event_id", "market_id", "outcome_id", "currency")):
+            event_id, market_id = self._resolve_trade_target(context, active.get("event_id"), active.get("market_id"))
+            if not all((event_id, market_id, active.get("outcome_id"), active.get("currency"))):
                 if isinstance(ud, dict):
                     ud.pop("pending_action", None)
                 await message.reply_text(
@@ -625,8 +699,8 @@ class TelegramHandler:
             try:
                 result = await asyncio.to_thread(
                     self._require_client().place_order,
-                    active["event_id"],
-                    active["market_id"],
+                    event_id,
+                    market_id,
                     side,
                     active["outcome_id"],
                     amount,
@@ -634,10 +708,11 @@ class TelegramHandler:
                     "MARKET",
                     None, None, None, None, None,
                 )
+                self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=active["outcome_id"], currency=active["currency"], side=side)
                 reply_text = self._format_order(result)
                 view_key = _detail_key(
                     "buy",
-                    f"{active['event_id']}:{active['market_id']}:{active['outcome_id']}:{amount}:{active['currency']}",
+                    f"{event_id}:{market_id}:{active['outcome_id']}:{amount}:{active['currency']}",
                 )
                 reply_text, keyboard = self._format_with_view_more(context, reply_text, view_key=view_key)
             except Exception as e:
@@ -649,7 +724,8 @@ class TelegramHandler:
         parsed = _brain_parse_trade_intent(text, active)
         if not parsed:
             return
-        if not active.get("event_id") or not active.get("market_id") or not active.get("outcome_id"):
+        event_id, market_id = self._resolve_trade_target(context, active.get("event_id"), active.get("market_id"))
+        if not event_id or not market_id or not active.get("outcome_id"):
             await message.reply_text(
                 "Pick a market first with /quote, then send something like ‘Buy, 700 NGN’.", parse_mode="HTML"
             )
@@ -667,11 +743,12 @@ class TelegramHandler:
         if not outcome_id:
             await message.reply_text("I need an active market outcome first. Use /quote to set one.", parse_mode="HTML")
             return
+        event_id, market_id = self._resolve_trade_target(context, event_id, market_id)
         try:
             result = await asyncio.to_thread(
                 self._require_client().place_order,
-                active["event_id"],
-                active["market_id"],
+                event_id,
+                market_id,
                 side,
                 outcome_id,
                 amount,
@@ -684,8 +761,8 @@ class TelegramHandler:
                 None,
             )
             text = self._format_order(result)
-            self._store_active_context(context, event_id=active["event_id"], market_id=active["market_id"], outcome_id=outcome_id, currency=currency, side=side)
-            view_key = _detail_key("smart-trade", f"{active['event_id']}:{active['market_id']}:{outcome_id}:{amount}:{currency}:{side}")
+            self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, currency=currency, side=side)
+            view_key = _detail_key("smart-trade", f"{event_id}:{market_id}:{outcome_id}:{amount}:{currency}:{side}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:
             text, keyboard = f"Error placing smart trade: {e}", None
@@ -911,3 +988,4 @@ def build_telegram_handler_from_env(bot_status_callback=None) -> Optional["Teleg
         return None
 
     return TelegramHandler(token=token, chat_id=chat_id, bot_status_callback=bot_status_callback)
+

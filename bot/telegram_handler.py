@@ -655,7 +655,7 @@ class TelegramHandler:
         if not lines:
             if query:
                 return (
-                    f"I couldn’t find any open markets for "{query}" right now. Try /events to browse everything, or send another keyword.",
+                    f"I couldn’t find any open markets for '{query}' right now. Try /events to browse everything, or send another keyword.",
                     None,
                 )
             return (
@@ -664,7 +664,7 @@ class TelegramHandler:
             )
 
         header = (
-            f"I found {total_matches} open market(s) mentioning "{query}":"
+            f"I found {total_matches} open market(s) mentioning '{query}':"
             if query
             else "Here are the open markets I found:"
         )

@@ -31,6 +31,7 @@ except ImportError as exc:
     raise ImportError("python-telegram-bot is required. Install it with: pip install python-telegram-bot") from exc
 
 DEFAULT_CHAT_ID = "6433282551"
+DEFAULT_SUCCESS_STICKER_SET = "MedesEtBayse"
 
 
 SMART_TRADE_SIDE_RE = re.compile(r"\b(buy|sell)\b", re.IGNORECASE)
@@ -127,11 +128,16 @@ class TelegramHandler:
         chat_id: str = DEFAULT_CHAT_ID,
         bayse_client=None,
         bot_status_callback=None,
+        success_sticker_set: str = DEFAULT_SUCCESS_STICKER_SET,
+        success_sticker_file_id: Optional[str] = None,
     ):
         self.token = token
         self.chat_id = chat_id
         self.bayse_client = bayse_client
         self._bot_status_callback = bot_status_callback
+        self.success_sticker_set = success_sticker_set.strip()
+        self.success_sticker_file_id = success_sticker_file_id.strip() if success_sticker_file_id else None
+        self._sticker_cache: dict[str, str] = {}
         self._app: Optional[Application] = None
 
     def attach_bayse_client(self, bayse_client) -> None:
@@ -158,6 +164,74 @@ class TelegramHandler:
         except RuntimeError:
             return asyncio.run(self.send_message(text, parse_mode))
 
+    async def _resolve_sticker_file_id(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> Optional[str]:
+        if sticker_file_id:
+            return sticker_file_id
+
+        sticker_set_name = (sticker_set_name or self.success_sticker_set or '').strip()
+        if not sticker_set_name:
+            return None
+
+        cached = self._sticker_cache.get(sticker_set_name)
+        if cached:
+            return cached
+
+        try:
+            bot = Bot(token=self.token)
+            async with bot:
+                sticker_set = await bot.get_sticker_set(sticker_set_name)
+            stickers = getattr(sticker_set, 'stickers', None) or []
+            if not stickers:
+                logger.warning(f'No stickers found in pack: {sticker_set_name}')
+                return None
+            resolved = stickers[0].file_id
+            self._sticker_cache[sticker_set_name] = resolved
+            return resolved
+        except Exception as e:
+            logger.warning(f'Failed to resolve sticker pack {sticker_set_name}: {e}')
+            return None
+
+    async def send_sticker(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> bool:
+        try:
+            resolved = await self._resolve_sticker_file_id(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name)
+            if not resolved:
+                return False
+            bot = Bot(token=self.token)
+            async with bot:
+                await bot.send_sticker(chat_id=self.chat_id, sticker=resolved)
+            logger.info('Telegram sticker sent successfully')
+            return True
+        except Exception as e:
+            logger.error(f'Telegram send_sticker failed: {e}')
+            return False
+
+    def send_sticker_sync(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> bool:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
+                return True
+            return loop.run_until_complete(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
+        except RuntimeError:
+            return asyncio.run(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
+
+    async def send_notification(self, text: str, level: str = 'info', parse_mode: str = 'HTML') -> bool:
+        message_ok = await self.send_message(text, parse_mode=parse_mode)
+        sticker_ok = False
+        if level == 'success':
+            sticker_ok = await self.send_sticker()
+        return message_ok or sticker_ok
+
+    def send_notification_sync(self, text: str, level: str = 'info', parse_mode: str = 'HTML') -> bool:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.send_notification(text, level=level, parse_mode=parse_mode))
+                return True
+            return loop.run_until_complete(self.send_notification(text, level=level, parse_mode=parse_mode))
+        except RuntimeError:
+            return asyncio.run(self.send_notification(text, level=level, parse_mode=parse_mode))
+
     async def send_signal(self, event_title: str, side: str, edge: float, stake: float, dry_run: bool = False) -> bool:
         label = "[DRY RUN] " if dry_run else ""
         text = (
@@ -172,7 +246,7 @@ class TelegramHandler:
     async def send_alert(self, message: str, level: str = "info") -> bool:
         emoji = {"info": "ℹ️", "success": "✅", "error": "❌"}.get(level, "🔔")
         text = f"{emoji} <b>medes-et-bayse</b>\n{message}"
-        return await self.send_message(text)
+        return await self.send_notification(text, level=level)
 
     def _require_client(self):
         if self.bayse_client is None:
@@ -905,9 +979,17 @@ class TelegramHandler:
 def build_telegram_handler_from_env(bot_status_callback=None) -> Optional["TelegramHandler"]:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", DEFAULT_CHAT_ID)
+    success_sticker_set = os.getenv("TELEGRAM_SUCCESS_STICKER_SET", DEFAULT_SUCCESS_STICKER_SET)
+    success_sticker_file_id = os.getenv("TELEGRAM_SUCCESS_STICKER_FILE_ID", "").strip() or None
 
     if not token:
         logger.warning("TELEGRAM_BOT_TOKEN not set — Telegram notifications disabled.")
         return None
 
-    return TelegramHandler(token=token, chat_id=chat_id, bot_status_callback=bot_status_callback)
+    return TelegramHandler(
+        token=token,
+        chat_id=chat_id,
+        bot_status_callback=bot_status_callback,
+        success_sticker_set=success_sticker_set,
+        success_sticker_file_id=success_sticker_file_id,
+    )

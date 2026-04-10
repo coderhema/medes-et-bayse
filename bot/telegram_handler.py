@@ -32,7 +32,6 @@ except ImportError as exc:
 
 DEFAULT_CHAT_ID = "6433282551"
 DEFAULT_SUCCESS_STICKER_SET = "MedesEtBayse"
-DEFAULT_SUCCESS_STICKER_SET = "MedesEtBayse"
 
 
 SMART_TRADE_SIDE_RE = re.compile(r"\b(buy|sell)\b", re.IGNORECASE)

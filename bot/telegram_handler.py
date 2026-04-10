@@ -463,7 +463,7 @@ class TelegramHandler:
 
     def _format_events(self, events: list[dict], limit: int = 10) -> str:
         if not events:
-            return "No active markets found."
+            return "I couldn’t find any open markets right now. Try /events again in a bit, or ask me to search for a keyword like "bitcoin"."
         lines = []
         for event in events[:limit]:
             title = event.get("title") or event.get("name") or "Untitled market"
@@ -518,6 +518,182 @@ class TelegramHandler:
         if summary:
             lines.append("\n" + " | ".join(summary))
         return "\n".join(lines)
+
+
+    @staticmethod
+    def _market_query_terms(text: str) -> list[str]:
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        stop_words = {
+            "a",
+            "an",
+            "and",
+            "are",
+            "can",
+            "check",
+            "do",
+            "for",
+            "from",
+            "get",
+            "got",
+            "have",
+            "hey",
+            "hi",
+            "how",
+            "is",
+            "list",
+            "looking",
+            "me",
+            "of",
+            "on",
+            "open",
+            "please",
+            "search",
+            "show",
+            "there",
+            "the",
+            "to",
+            "up",
+            "want",
+            "what",
+            "which",
+        }
+        market_words = {
+            "event",
+            "events",
+            "market",
+            "markets",
+            "bitcoin",
+            "btc",
+            "ethereum",
+            "eth",
+            "solana",
+            "doge",
+            "dogecoin",
+            "crypto",
+            "usdc",
+            "usdt",
+        }
+        return [token for token in tokens if token not in stop_words and token not in market_words]
+
+    @staticmethod
+    def _looks_like_market_intent(text: str) -> bool:
+        tokens = re.findall(r"[a-z0-9]+", text.lower())
+        if not tokens:
+            return False
+        trigger_words = {
+            "any",
+            "browse",
+            "check",
+            "event",
+            "events",
+            "find",
+            "is",
+            "list",
+            "market",
+            "markets",
+            "open",
+            "search",
+            "show",
+            "there",
+            "what",
+            "which",
+        }
+        topic_words = {
+            "bitcoin",
+            "btc",
+            "ethereum",
+            "eth",
+            "solana",
+            "doge",
+            "dogecoin",
+            "crypto",
+            "usdc",
+            "usdt",
+        }
+        return any(token in trigger_words or token in topic_words for token in tokens)
+
+    @staticmethod
+    def _event_search_blob(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str).lower()
+        except Exception:
+            return str(value).lower()
+
+    def _format_market_results(self, events: list[dict], query: str = "") -> tuple[str, Optional[InlineKeyboardMarkup]]:
+        query = query.strip()
+        query_terms = self._market_query_terms(query) if query else []
+        lines: list[str] = []
+        rows: list[list[InlineKeyboardButton]] = []
+        total_matches = 0
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            title = event.get("title") or event.get("name") or "Untitled market"
+            event_id = str(event.get("id") or event.get("eventId") or "").strip()
+            blob = self._event_search_blob(event)
+            if query_terms and not any(term in blob for term in query_terms):
+                continue
+
+            total_matches += 1
+            if len(lines) < 10:
+                matched_markets: list[str] = []
+                if query_terms:
+                    for market in self._event_markets(event):
+                        market_blob = self._event_search_blob(market)
+                        if any(term in market_blob for term in query_terms):
+                            market_title = market.get("title") or market.get("name") or market.get("label") or market.get("id") or "Untitled market"
+                            matched_markets.append(str(market_title))
+
+                line = f"• {title}
+  id: {event_id or 'unknown'}"
+                if query_terms and matched_markets:
+                    line += f"
+  matching markets: {', '.join(matched_markets[:3])}"
+                lines.append(line)
+                if event_id:
+                    rows.append([InlineKeyboardButton(str(title), callback_data=f"event:{event_id}")])
+
+        if not lines:
+            if query:
+                return (
+                    f"I couldn’t find any open markets for "{query}" right now. Try /events to browse everything, or send another keyword.",
+                    None,
+                )
+            return (
+                "I couldn’t find any open markets right now. Try /events again in a bit, or ask me to search for a keyword like "bitcoin".",
+                None,
+            )
+
+        header = (
+            f"I found {total_matches} open market(s) mentioning "{query}":"
+            if query
+            else "Here are the open markets I found:"
+        )
+        if total_matches > len(lines):
+            header += f"
+Showing the first {len(lines)} results."
+        return header + "
+" + "
+".join(lines), InlineKeyboardMarkup(rows) if rows else None
+
+    async def _show_market_catalog(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = "") -> None:
+        client = self._require_client()
+        query = query.strip()
+        try:
+            events = await asyncio.to_thread(client.get_open_events, 1, 50)
+            text, keyboard = self._format_market_results(events, query=query)
+            await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception as e:
+            if query:
+                fallback = f'I hit a snag while searching for "{query}". Try /events again in a moment.'
+            else:
+                fallback = "I hit a snag while checking open markets. Try /events again in a moment."
+            await update.message.reply_text(fallback, parse_mode="HTML")
+
+    async def _cmd_markets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = " ".join(context.args).strip() if context.args else ""
+        await self._show_market_catalog(update, context, query=query)
 
     @staticmethod
     def _format_quote(quote: dict, event_id: str, market_id: str, side: str, outcome_id: str, amount: float, currency: str) -> str:
@@ -577,16 +753,29 @@ class TelegramHandler:
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "<b>Commands</b>\n"
-            "/status — bot status\n"
-            "/balance — wallet balances\n"
-            "/portfolio — open positions\n"
-            "/events — active markets\n"
-            "/quote — price quote before an order\n"
-            "/order — place a Bayse order\n"
-            "Reply with a short trade like 'Buy, 700 NGN' after you set an active market with /quote\n\n"
-            "Examples:\n"
-            "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD\n"
+            "<b>Commands</b>
+"
+            "/status — bot status
+"
+            "/balance — wallet balances
+"
+            "/portfolio — open positions
+"
+            "/events — active markets
+"
+            "/markets — search open markets by keyword
+"
+            "/quote — price quote before an order
+"
+            "/order — place a Bayse order
+"
+            "You can also say things like 'show me events' or 'is there any bitcoin market'.
+
+"
+            "Examples:
+"
+            "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD
+"
             "/order event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 type=MARKET currency=USD",
             parse_mode="HTML",
         )
@@ -624,39 +813,12 @@ class TelegramHandler:
         )
 
     async def _cmd_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        client = self._require_client()
-        limit = 10
-        if context.args:
-            try:
-                limit = max(1, min(25, int(context.args[0])))
-            except Exception:
-                limit = 10
-        try:
-            events = await asyncio.to_thread(client.get_open_events, 1, limit)
-            if not events:
-                await update.message.reply_text("<b>Active markets</b>\nNo active markets found.", parse_mode="HTML")
-                return
-            # Cache events by ID so callback handlers can look up the full event dict
-            ud = getattr(context, "user_data", {})
-            if isinstance(ud, dict):
-                cache = ud.setdefault("_event_cache", {})
-                for ev in events:
-                    if ev.get("id"):
-                        cache[ev["id"]] = ev
-            keyboard_rows = []
-            for event in events[:limit]:
-                event_id = event.get("id", "")
-                title = event.get("title") or event.get("name") or "Untitled market"
-                if event_id:
-                    keyboard_rows.append([InlineKeyboardButton(title, callback_data=f"event:{event_id}")])
-            keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
-            await update.message.reply_text(
-                "<b>Active markets</b>\nTap an event to explore its markets:",
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            await update.message.reply_text(f"Error fetching active markets: {e}", parse_mode="HTML")
+        query = " ".join(context.args).strip() if context.args else ""
+        await self._show_market_catalog(update, context, query=query)
+
+    async def _cmd_markets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = " ".join(context.args).strip() if context.args else ""
+        await self._show_market_catalog(update, context, query=query)
 
     async def _cmd_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         client = self._require_client()
@@ -787,6 +949,11 @@ class TelegramHandler:
             await message.reply_text(reply_text, reply_markup=keyboard, parse_mode="HTML")
             return
 
+        if self._looks_like_market_intent(text):
+            query = " ".join(self._market_query_terms(text)).strip()
+            await self._show_market_catalog(update, context, query=query)
+            return
+
         active = self._active_context(context)
         parsed = _brain_parse_trade_intent(text, active)
         if not parsed:
@@ -890,7 +1057,10 @@ class TelegramHandler:
             return
         outcomes = self._market_outcomes(market)
         if not outcomes:
-            await query.edit_message_text("No outcomes found for this market.", parse_mode="HTML")
+            await query.edit_message_text(
+                "I found the event, but it doesn’t have any markets I can show right now. Try /events to go back to the main list.",
+                parse_mode="HTML",
+            )
             return
         market_title = market.get("title") or market.get("name") or market_id
         keyboard_rows = []
@@ -1018,6 +1188,7 @@ class TelegramHandler:
         app.add_handler(CommandHandler("balance", self._cmd_balance))
         app.add_handler(CommandHandler("portfolio", self._cmd_portfolio))
         app.add_handler(CommandHandler("events", self._cmd_events))
+        app.add_handler(CommandHandler("markets", self._cmd_markets))
         app.add_handler(CommandHandler("quote", self._cmd_quote))
         app.add_handler(CommandHandler("order", self._cmd_order))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._cmd_text))

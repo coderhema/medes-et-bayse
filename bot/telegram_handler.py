@@ -232,74 +232,6 @@ class TelegramHandler:
         except RuntimeError:
             return asyncio.run(self.send_notification(text, level=level, parse_mode=parse_mode))
 
-    async def _resolve_sticker_file_id(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> Optional[str]:
-        if sticker_file_id:
-            return sticker_file_id
-
-        sticker_set_name = (sticker_set_name or self.success_sticker_set or '').strip()
-        if not sticker_set_name:
-            return None
-
-        cached = self._sticker_cache.get(sticker_set_name)
-        if cached:
-            return cached
-
-        try:
-            bot = Bot(token=self.token)
-            async with bot:
-                sticker_set = await bot.get_sticker_set(sticker_set_name)
-            stickers = getattr(sticker_set, 'stickers', None) or []
-            if not stickers:
-                logger.warning(f'No stickers found in pack: {sticker_set_name}')
-                return None
-            resolved = stickers[0].file_id
-            self._sticker_cache[sticker_set_name] = resolved
-            return resolved
-        except Exception as e:
-            logger.warning(f'Failed to resolve sticker pack {sticker_set_name}: {e}')
-            return None
-
-    async def send_sticker(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> bool:
-        try:
-            resolved = await self._resolve_sticker_file_id(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name)
-            if not resolved:
-                return False
-            bot = Bot(token=self.token)
-            async with bot:
-                await bot.send_sticker(chat_id=self.chat_id, sticker=resolved)
-            logger.info('Telegram sticker sent successfully')
-            return True
-        except Exception as e:
-            logger.error(f'Telegram send_sticker failed: {e}')
-            return False
-
-    def send_sticker_sync(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> bool:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
-                return True
-            return loop.run_until_complete(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
-        except RuntimeError:
-            return asyncio.run(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
-
-    async def send_notification(self, text: str, level: str = 'info', parse_mode: str = 'HTML') -> bool:
-        message_ok = await self.send_message(text, parse_mode=parse_mode)
-        sticker_ok = False
-        if level == 'success':
-            sticker_ok = await self.send_sticker()
-        return message_ok or sticker_ok
-
-    def send_notification_sync(self, text: str, level: str = 'info', parse_mode: str = 'HTML') -> bool:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self.send_notification(text, level=level, parse_mode=parse_mode))
-                return True
-            return loop.run_until_complete(self.send_notification(text, level=level, parse_mode=parse_mode))
-        except RuntimeError:
-            return asyncio.run(self.send_notification(text, level=level, parse_mode=parse_mode))
-
     async def send_signal(self, event_title: str, side: str, edge: float, stake: float, dry_run: bool = False) -> bool:
         label = "[DRY RUN] " if dry_run else ""
         text = (
@@ -381,6 +313,23 @@ class TelegramHandler:
         if isinstance(data, dict):
             data["active_trade_context"] = ctx
         return ctx
+
+    def _resolve_trade_context(self, context: Any, **overrides: Any) -> dict[str, Any]:
+        """Return the active trade context with any non-empty overrides merged in."""
+        ctx = self._normalize_trade_context(context)
+        for key, value in overrides.items():
+            if value not in (None, ""):
+                ctx[key] = value
+        if ctx:
+            self._sync_trade_context_aliases(ctx)
+            data = getattr(context, "user_data", None)
+            if isinstance(data, dict):
+                data["active_trade_context"] = ctx
+        return ctx
+
+    @staticmethod
+    def _trade_context_ready(ctx: dict[str, Any]) -> bool:
+        return all(_normalize_text(ctx.get(key)) for key in ("event_id", "market_id", "outcome_id", "currency"))
 
     def _update_active_context(self, context: Any, **kwargs: Any) -> None:
         """Update individual fields of the active trade context without replacing the whole dict."""
@@ -898,8 +847,8 @@ class TelegramHandler:
                 await message.reply_text("Please enter a numeric amount, e.g. 500", parse_mode="HTML")
                 return
             amount = float(amount_match.group(1))
-            active = self._normalize_trade_context(context)
-            if not all(active.get(k) for k in ("event_id", "market_id", "outcome_id", "currency")):
+            active = self._resolve_trade_context(context)
+            if not self._trade_context_ready(active):
                 if isinstance(ud, dict):
                     ud.pop("pending_action", None)
                 await message.reply_text(
@@ -937,11 +886,11 @@ class TelegramHandler:
             await self._show_market_catalog(update, context, query=query)
             return
 
-        active = self._active_context(context)
+        active = self._resolve_trade_context(context)
         parsed = _brain_parse_trade_intent(text, active)
         if not parsed:
             return
-        if not active.get("event_id") or not active.get("market_id") or not active.get("outcome_id"):
+        if not self._trade_context_ready(active):
             await message.reply_text(
                 "Pick a market first with /quote, then send something like ‘Buy, 700 NGN’.", parse_mode="HTML"
             )
@@ -1014,30 +963,37 @@ class TelegramHandler:
 
     async def _cb_market(self, query: Any, context: ContextTypes.DEFAULT_TYPE, market_id: str, event_id: str = "") -> None:
         """Handle user tapping a market button — show all outcomes as buttons."""
-        if event_id:
-            self._update_active_context(context, event_id=event_id)
-        self._update_active_context(context, market_id=market_id)
-        market: Optional[dict] = None
         event_cache = self._get_event_cache(context)
-        if event_id and event_id in event_cache:
-            for m in self._event_markets(event_cache[event_id]):
+        resolved_event_id = _normalize_text(event_id)
+        market: Optional[dict] = None
+
+        if resolved_event_id and resolved_event_id in event_cache:
+            for m in self._event_markets(event_cache[resolved_event_id]):
                 if m.get("id") == market_id:
                     market = m
                     break
+
         if market is None:
             for ev in event_cache.values():
                 for m in self._event_markets(ev):
                     if m.get("id") == market_id:
                         market = m
-                        event_id = event_id or ev.get("id", "")
+                        resolved_event_id = resolved_event_id or _normalize_text(ev.get("id", ""))
                         break
                 if market:
                     break
+
         if market is None:
             await query.edit_message_text(
                 "Market data not found. Please use /events to start fresh.", parse_mode="HTML"
             )
             return
+
+        if not resolved_event_id:
+            resolved_event_id = _normalize_text(market.get("event_id") or market.get("eventId") or "")
+
+        active = self._resolve_trade_context(context, event_id=resolved_event_id, market_id=market_id)
+        market_title = market.get("title") or market.get("name") or market_id
         outcomes = self._market_outcomes(market)
         if not outcomes:
             await query.edit_message_text(
@@ -1045,7 +1001,7 @@ class TelegramHandler:
                 parse_mode="HTML",
             )
             return
-        market_title = market.get("title") or market.get("name") or market_id
+
         keyboard_rows = []
         for outcome in outcomes:
             outcome_id = outcome.get("id", "")
@@ -1053,7 +1009,7 @@ class TelegramHandler:
                 outcome.get("title") or outcome.get("name") or outcome.get("label") or outcome_id
             )
             if outcome_id:
-                keyboard_rows.append([InlineKeyboardButton(outcome_title, callback_data=f"outcome:{event_id}:{market_id}:{outcome_id}")])
+                keyboard_rows.append([InlineKeyboardButton(outcome_title, callback_data=f"outcome:{active.get('event_id', resolved_event_id)}:{market_id}:{outcome_id}")])
         keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
         await query.edit_message_text(
             f"<b>{market_title}</b>\nSelect an outcome:",
@@ -1063,28 +1019,33 @@ class TelegramHandler:
 
     async def _cb_outcome(self, query: Any, context: ContextTypes.DEFAULT_TYPE, outcome_id: str, event_id: str = "", market_id: str = "") -> None:
         """Handle user tapping an outcome button — show currency selection."""
-        if event_id:
-            self._update_active_context(context, event_id=event_id)
-        if market_id:
-            self._update_active_context(context, market_id=market_id)
-        self._update_active_context(context, outcome_id=outcome_id, side="BUY")
+        active = self._resolve_trade_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, side="BUY")
+        if not self._trade_context_ready({**active, "currency": _normalize_text(active.get("currency") or "USD")}):
+            await query.edit_message_text(
+                "Context lost. Please use /events to start fresh.", parse_mode="HTML"
+            )
+            return
+
+        resolved_event_id = _normalize_text(active.get("event_id"))
+        resolved_market_id = _normalize_text(active.get("market_id"))
+        resolved_outcome_id = _normalize_text(active.get("outcome_id"))
+
         outcome_title: Optional[str] = None
-        active = self._normalize_trade_context(context)
-        market_id = market_id or active.get("market_id")
         for ev in self._get_event_cache(context).values():
             for m in self._event_markets(ev):
-                if m.get("id") == market_id:
+                if m.get("id") == resolved_market_id:
                     for o in self._market_outcomes(m):
-                        if o.get("id") == outcome_id:
+                        if o.get("id") == resolved_outcome_id:
                             outcome_title = o.get("title") or o.get("name") or o.get("label")
                             break
                     break
             if outcome_title:
                 break
-        label = outcome_title or outcome_id
+
+        label = outcome_title or resolved_outcome_id
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("NGN", callback_data=f"currency:{event_id}:{market_id}:{outcome_id}:NGN"),
-            InlineKeyboardButton("USD", callback_data=f"currency:{event_id}:{market_id}:{outcome_id}:USD"),
+            InlineKeyboardButton("NGN", callback_data=f"currency:{resolved_event_id}:{resolved_market_id}:{resolved_outcome_id}:NGN"),
+            InlineKeyboardButton("USD", callback_data=f"currency:{resolved_event_id}:{resolved_market_id}:{resolved_outcome_id}:USD"),
         ]])
         await query.edit_message_text(
             f"Outcome: <b>{label}</b>\nSelect currency:",
@@ -1095,13 +1056,17 @@ class TelegramHandler:
     async def _cb_currency(self, query: Any, context: ContextTypes.DEFAULT_TYPE, currency: str, event_id: str = "", market_id: str = "", outcome_id: str = "") -> None:
         """Handle currency selection — prompt for amount."""
         currency = currency.upper()
-        if event_id:
-            self._update_active_context(context, event_id=event_id)
-        if market_id:
-            self._update_active_context(context, market_id=market_id)
-        if outcome_id:
-            self._update_active_context(context, outcome_id=outcome_id)
-        self._update_active_context(context, currency=currency)
+        active = self._resolve_trade_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, currency=currency)
+        if not self._trade_context_ready(active):
+            ud = getattr(context, "user_data", {})
+            if isinstance(ud, dict):
+                ud.pop("pending_action", None)
+            await query.edit_message_text(
+                "Context lost. Please use /events to start fresh.",
+                parse_mode="HTML",
+            )
+            return
+
         ud = getattr(context, "user_data", {})
         if isinstance(ud, dict):
             ud["pending_action"] = "awaiting_amount"

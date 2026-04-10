@@ -659,7 +659,7 @@ class TelegramHandler:
                     None,
                 )
             return (
-                "I couldn’t find any open markets right now. Try /events again in a bit, or ask me to search for a keyword like "bitcoin".",
+                "I couldn’t find any open markets right now. Try /events again in a bit, or ask me to search for a keyword like 'bitcoin'.",
                 None,
             )
 

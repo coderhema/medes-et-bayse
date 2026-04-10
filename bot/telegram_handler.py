@@ -670,9 +670,7 @@ class TelegramHandler:
         )
         if total_matches > len(lines):
             header += f"\nShowing the first {len(lines)} results."
-        return header + "
-" + "
-".join(lines), InlineKeyboardMarkup(rows) if rows else None
+        return header + "\n" + "\n".join(lines), InlineKeyboardMarkup(rows) if rows else None
 
     async def _show_market_catalog(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = "") -> None:
         client = self._require_client()

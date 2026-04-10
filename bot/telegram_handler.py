@@ -463,7 +463,7 @@ class TelegramHandler:
 
     def _format_events(self, events: list[dict], limit: int = 10) -> str:
         if not events:
-            return "I couldn’t find any open markets right now. Try /events again in a bit, or ask me to search for a keyword like "bitcoin"."
+            return "I couldn’t find any open markets right now. Try /events again in a bit, or ask me to search for a keyword like 'bitcoin'."
         lines = []
         for event in events[:limit]:
             title = event.get("title") or event.get("name") or "Untitled market"

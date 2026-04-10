@@ -94,7 +94,13 @@ class PokeClient:
     def _send_to_telegram(self, message: str, level: str) -> bool:
         if self.telegram is None:
             return False
-        return self.telegram.send_message_sync(text=f'<b>medes-et-bayse</b> [{level}]\n{message}')
+
+        formatted = f'<b>medes-et-bayse</b> [{level}]
+{message}'
+        notifier = getattr(self.telegram, 'send_notification_sync', None)
+        if callable(notifier):
+            return bool(notifier(text=formatted, level=level))
+        return self.telegram.send_message_sync(text=formatted)
 
     def attach_telegram(self, telegram: 'TelegramHandler') -> None:
         self.telegram = telegram

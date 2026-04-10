@@ -78,6 +78,47 @@ def _attach_live_quotes(events: list[dict], quote_manager: Optional[QuoteManager
         event["liveQuoteAgeSeconds"] = quote_manager.quote_age_seconds(market_id)
 
 
+
+
+def _execute_quote_plan(client: BayseClient, quote_plan: dict, dry_run: bool, currency: str) -> list[dict]:
+    placements: list[dict] = []
+    event_id = str(quote_plan.get('event_id') or '').strip()
+    market_id = str(quote_plan.get('market_id') or '').strip()
+    outcome_id = str(quote_plan.get('outcome_id') or '').strip()
+
+    for order in quote_plan.get('quote_orders', []):
+        if not isinstance(order, dict):
+            continue
+        side = str(order.get('side') or '').strip().upper()
+        price = float(order.get('price') or 0.0)
+        amount = float(order.get('amount') or 0.0)
+        if not side or price <= 0 or amount <= 0:
+            continue
+        if dry_run:
+            logger.info(
+                f"[DRY RUN] Quote {quote_plan.get('event_title', 'unknown event')} | {side} @ {price:.4f} x {amount:.2f}"
+            )
+            result = {
+                'dry_run': True,
+                'side': side,
+                'price': round(price, 4),
+                'amount': round(amount, 2),
+            }
+        else:
+            result = client.place_post_only_limit_order(
+                event_id=event_id,
+                market_id=market_id,
+                outcome_id=outcome_id,
+                side=side,
+                amount=amount,
+                price=price,
+                currency=currency,
+            )
+        placements.append(result)
+
+    return placements
+
+
 def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
     side = str(signal.get("side", "")).upper()
     market_id = str(
@@ -144,6 +185,7 @@ def run_cycle(
     dry_run: bool = True,
     bayse_user_id: str = "",
     quote_manager: Optional[QuoteManager] = None,
+    quote_currency: str = "USD",
 ) -> None:
     logger.info("Starting trading cycle...")
 
@@ -154,21 +196,40 @@ def run_cycle(
         _attach_live_quotes(events, quote_manager)
         logger.info(f"Realtime quote manager tracking {len(quote_manager.snapshot())} market(s)")
 
+    executed = []
     all_signals = []
+    portfolio = None
+    if any(isinstance(strategy, MarketMakerStrategy) for strategy in strategies):
+        try:
+            portfolio = client.get_portfolio()
+            logger.debug("Fetched portfolio snapshot for market making")
+        except Exception as exc:
+            logger.warning(f"Portfolio snapshot unavailable for market making: {exc}")
+
     for strategy in strategies:
+        if isinstance(strategy, MarketMakerStrategy):
+            quote_plans = strategy.generate_quotes(events, portfolio=portfolio)
+            if quote_plans:
+                logger.info(f"[{strategy.name}] Built {len(quote_plans)} quote plan(s)")
+            for quote_plan in quote_plans:
+                placements = _execute_quote_plan(client, quote_plan, dry_run=dry_run, currency=quote_currency)
+                executed.append({**quote_plan, "placements": placements})
+            continue
+
         signals = strategy.scan(events)
         if signals:
             logger.info(f"[{strategy.name}] Found {len(signals)} signal(s)")
             all_signals.extend(signals)
 
-    if not all_signals:
+    if not all_signals and not executed:
         logger.debug("No actionable signals this cycle.")
         return
 
-    executed = []
     for signal in all_signals:
         logger.info(
-            f"Signal: {signal['event_title']} | Side: {signal['side']} | Edge: {signal['edge']:.2%} | Stake: ${signal['stake']:.2f} USDC"
+            f"Signal: {signal['event_title']} | Side: {signal['side']} | Edge: {signal['edge']:.2%} | Stake: $"
+            + format(float(signal['stake']), '.2f')
+            + " USDC"
         )
         if not dry_run:
             event_id, market_id, outcome_id, currency, price = _resolve_trade_args(signal)
@@ -198,8 +259,8 @@ def run_cycle(
 
     _notify(
         poke,
-        f"medes-et-bayse: Cycle complete. {len(executed)} trade(s) {'simulated' if dry_run else 'executed'}.",
-        payload={"user_id": bayse_user_id, "trades": executed},
+        f"medes-et-bayse: Cycle complete. {len(executed)} action(s) {'simulated' if dry_run else 'executed'}.",
+        payload={"user_id": bayse_user_id, "actions": executed},
         level="success",
     )
     logger.info("Cycle complete.")
@@ -296,6 +357,7 @@ def main():
 
     min_edge = float(os.getenv("MIN_EDGE", "0.03"))
     max_position_fraction = float(os.getenv("MAX_POSITION_FRACTION", "0.05"))
+    quote_currency = _env("BAYSE_CURRENCY", default="USD")
 
     strategy_map = {
         "kelly": [KellyStrategy(bankroll=bankroll, min_edge=min_edge, max_fraction=max_position_fraction)],
@@ -323,7 +385,7 @@ def main():
         try:
             while True:
                 try:
-                    run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager)
+                    run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager, quote_currency=quote_currency)
                 except Exception as e:
                     logger.error(f"Cycle error: {e}")
                     _notify(poke, f"medes-et-bayse ERROR: {e}", level="error")
@@ -332,7 +394,7 @@ def main():
             stop_event.set()
             quote_manager.stop()
     else:
-        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager)
+        run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager, quote_currency=quote_currency)
         quote_manager.stop()
 
 

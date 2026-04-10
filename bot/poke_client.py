@@ -95,8 +95,7 @@ class PokeClient:
         if self.telegram is None:
             return False
 
-        formatted = f'<b>medes-et-bayse</b> [{level}]
-{message}'
+        formatted = f'<b>medes-et-bayse</b> [{level}]\n{message}'
         notifier = getattr(self.telegram, 'send_notification_sync', None)
         if callable(notifier):
             return bool(notifier(text=formatted, level=level))

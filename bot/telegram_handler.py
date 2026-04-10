@@ -32,6 +32,7 @@ except ImportError as exc:
 
 DEFAULT_CHAT_ID = "6433282551"
 DEFAULT_SUCCESS_STICKER_SET = "MedesEtBayse"
+DEFAULT_SUCCESS_STICKER_SET = "MedesEtBayse"
 
 
 SMART_TRADE_SIDE_RE = re.compile(r"\b(buy|sell)\b", re.IGNORECASE)
@@ -163,6 +164,74 @@ class TelegramHandler:
             return loop.run_until_complete(self.send_message(text, parse_mode))
         except RuntimeError:
             return asyncio.run(self.send_message(text, parse_mode))
+
+    async def _resolve_sticker_file_id(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> Optional[str]:
+        if sticker_file_id:
+            return sticker_file_id
+
+        sticker_set_name = (sticker_set_name or self.success_sticker_set or '').strip()
+        if not sticker_set_name:
+            return None
+
+        cached = self._sticker_cache.get(sticker_set_name)
+        if cached:
+            return cached
+
+        try:
+            bot = Bot(token=self.token)
+            async with bot:
+                sticker_set = await bot.get_sticker_set(sticker_set_name)
+            stickers = getattr(sticker_set, 'stickers', None) or []
+            if not stickers:
+                logger.warning(f'No stickers found in pack: {sticker_set_name}')
+                return None
+            resolved = stickers[0].file_id
+            self._sticker_cache[sticker_set_name] = resolved
+            return resolved
+        except Exception as e:
+            logger.warning(f'Failed to resolve sticker pack {sticker_set_name}: {e}')
+            return None
+
+    async def send_sticker(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> bool:
+        try:
+            resolved = await self._resolve_sticker_file_id(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name)
+            if not resolved:
+                return False
+            bot = Bot(token=self.token)
+            async with bot:
+                await bot.send_sticker(chat_id=self.chat_id, sticker=resolved)
+            logger.info('Telegram sticker sent successfully')
+            return True
+        except Exception as e:
+            logger.error(f'Telegram send_sticker failed: {e}')
+            return False
+
+    def send_sticker_sync(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> bool:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
+                return True
+            return loop.run_until_complete(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
+        except RuntimeError:
+            return asyncio.run(self.send_sticker(sticker_file_id=sticker_file_id, sticker_set_name=sticker_set_name))
+
+    async def send_notification(self, text: str, level: str = 'info', parse_mode: str = 'HTML') -> bool:
+        message_ok = await self.send_message(text, parse_mode=parse_mode)
+        sticker_ok = False
+        if level == 'success':
+            sticker_ok = await self.send_sticker()
+        return message_ok or sticker_ok
+
+    def send_notification_sync(self, text: str, level: str = 'info', parse_mode: str = 'HTML') -> bool:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.send_notification(text, level=level, parse_mode=parse_mode))
+                return True
+            return loop.run_until_complete(self.send_notification(text, level=level, parse_mode=parse_mode))
+        except RuntimeError:
+            return asyncio.run(self.send_notification(text, level=level, parse_mode=parse_mode))
 
     async def _resolve_sticker_file_id(self, sticker_file_id: Optional[str] = None, sticker_set_name: Optional[str] = None) -> Optional[str]:
         if sticker_file_id:

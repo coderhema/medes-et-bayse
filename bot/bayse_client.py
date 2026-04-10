@@ -189,6 +189,34 @@ class BayseClient:
         logger.info(f"Placing order: {body}")
         return self._post(f"/v1/pm/events/{event_id}/markets/{market_id}/orders", body, sign=True)
 
+    def place_post_only_limit_order(
+        self,
+        event_id: str,
+        market_id: str,
+        *,
+        outcome_id: str,
+        side: str,
+        amount: float,
+        price: float,
+        currency: str = 'USD',
+        expires_at: Optional[str] = None,
+    ) -> dict:
+        if price is None:
+            raise ValueError('price is required for a post-only limit order')
+        return self.place_order(
+            event_id=event_id,
+            market_id=market_id,
+            outcome_id=outcome_id,
+            side=side,
+            amount=amount,
+            currency=currency,
+            order_type='LIMIT',
+            price=price,
+            time_in_force='GTC',
+            post_only=True,
+            expires_at=expires_at,
+        )
+
     def cancel_order(self, order_id: str) -> dict:
         return self._delete(f"/v1/pm/orders/{order_id}")
 

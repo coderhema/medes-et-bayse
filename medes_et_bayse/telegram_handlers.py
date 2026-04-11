@@ -26,6 +26,11 @@ GENERAL_QUANT_GUIDANCE = "quant best practice: prefer limit orders, size positio
 logger = logging.getLogger(__name__)
 
 
+def _should_suppress_debug_message(text: Any) -> bool:
+    normalized = _normalize_text(text).lower()
+    return any(phrase in normalized for phrase in DEBUG_SPAM_PHRASES)
+
+
 @dataclass(frozen=True)
 class CommandResult:
     ok: bool

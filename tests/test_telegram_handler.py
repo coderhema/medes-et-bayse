@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from bot.telegram_handler import TelegramHandler
+from medes_et_bayse import telegram_handlers as package_handlers
 
 
 def make_context(active_trade_context=None):
@@ -50,3 +51,8 @@ def test_resolve_trade_context_ignores_blank_overrides():
     assert resolved["outcome_id"] == "out_333"
     assert resolved["currency"] == "NGN"
     assert handler._trade_context_ready(resolved)
+
+
+def test_should_suppress_debug_message_matches_debug_phrases():
+    assert package_handlers._should_suppress_debug_message("No signals this cycle")
+    assert not package_handlers._should_suppress_debug_message("fresh update")

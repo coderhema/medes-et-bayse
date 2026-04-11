@@ -1273,8 +1273,10 @@ def build_quote_command(client: BayseClient, text: str, context: Any = None) -> 
             payload = None
 
     if payload is None:
-        try:
-            payload def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
+        return CommandResult(False, f"No quote data found for {term}")
+
+
+def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     args = _split_args(text)
     active_candidate = _active_market_candidate(context)
     selected_trade = _active_trade_selection(context)
@@ -1399,7 +1401,11 @@ def build_quote_command(client: BayseClient, text: str, context: Any = None) -> 
     else:
         if len(args) < 6:
             if use_active_context:
-                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nChoose an outcome and sdef build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
+                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nChoose an outcome and send the amount."
+                return CommandResult(False, prompt, raw={"next_step": "amount"})
+
+
+def build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
     active_candidate = _active_market_candidate(context)
     if not isinstance(active_candidate, dict) or not active_candidate.get("event_id") or not active_candidate.get("market_id"):
         return None
@@ -1450,23 +1456,6 @@ def build_events_command(client: BayseClient, text: str = "") -> CommandResult:
     if term:
         heading = f"Search results for {_normalize_text(term)}"
         if term.lower() in KNOWN_EVENT_CATEGORIES:
-            params = {"category": term.lower(), "status": "open"}
-        else:
-            params = {"keyword": term, "status": "open"}
-    try:
-        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params=params)
-        events = _extract_collection(payload)
-        if not events:
-            return CommandResult(False, "No markets or events were returned by Bayse.")
-        raw = {"mode": "events", "term": term, "events": events, "payload": payload, "params": params}
-        return CommandResult(True, _events_text(events, heading=heading), raw=raw)
-    except BayseClientError as exc:
-        return CommandResult(False, _error_text(exc))
-    except Exception as exc:
-        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
-
-
-f term.lower() in KNOWN_EVENT_CATEGORIES:
             params = {"category": term.lower(), "status": "open"}
         else:
             params = {"keyword": term, "status": "open"}

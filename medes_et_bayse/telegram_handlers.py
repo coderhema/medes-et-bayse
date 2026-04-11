@@ -684,8 +684,8 @@ def _trade_view_bucket(context: Any) -> dict[str, dict[str, Any]]:
 
 
 def _trade_view_key(candidate: dict[str, Any]) -> str:
-    event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), default="")
-    market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), default="")
+    event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
+    market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
     base = f"{event_id}:{market_id}".strip(":") or _first_string(candidate.get("event_title"), candidate.get("market_title"), default="trade")
     return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
 
@@ -941,8 +941,12 @@ def _brain_parse_trade_intent(text: str, candidate: dict[str, Any]) -> dict[str,
             "event_title": candidate.get("event_title"),
             "market_title": candidate.get("market_title"),
             "event_id": candidate.get("event_id"),
+            "eventId": candidate.get("eventId"),
+            "eventid": candidate.get("eventid"),
             "active_market_id": candidate.get("market_id"),
             "market_id": candidate.get("market_id"),
+            "marketId": candidate.get("marketId"),
+            "marketid": candidate.get("marketid"),
             "supported_currency": candidate.get("currency"),
         },
         "expected_shape": {
@@ -1062,8 +1066,12 @@ def _candidate_from_event_market(event: dict[str, Any], market: dict[str, Any]) 
         "market_title": _market_title(market),
         "yes_price": yes_price,
         "no_price": no_price,
-        "event_id": _first_string(event.get("id"), event.get("eventId"), default=""),
-        "market_id": _first_string(market.get("id"), market.get("marketId"), default=""),
+        "event_id": _first_string(event.get("id"), event.get("eventId"), event.get("eventid"), default=""),
+        "eventId": _first_string(event.get("id"), event.get("eventId"), event.get("eventid"), default=""),
+        "eventid": _first_string(event.get("id"), event.get("eventId"), event.get("eventid"), default=""),
+        "market_id": _first_string(market.get("id"), market.get("marketId"), market.get("marketid"), default=""),
+        "marketId": _first_string(market.get("id"), market.get("marketId"), market.get("marketid"), default=""),
+        "marketid": _first_string(market.get("id"), market.get("marketId"), market.get("marketid"), default=""),
         "outcome1_id": _first_string(market.get("outcome1Id"), default=""),
         "outcome2_id": _first_string(market.get("outcome2Id"), default=""),
         "currency": _event_currency_label(event),
@@ -1117,7 +1125,7 @@ def _quote_keyboard(candidates: list[dict[str, Any]]) -> Any:
 def _watchlist_keyboard(events: list[dict[str, Any]]) -> Any:
     rows = []
     for event in events[:10]:
-        rows.append([InlineKeyboardButton(_truncate_text(_event_title(event), 52), callback_data=f"watch:{_first_string(event.get('id'), event.get('eventId'), default='')}")])
+        rows.append([InlineKeyboardButton(_truncate_text(_event_title(event), 52), callback_data=f"watch:{_first_string(event.get('id'), event.get('eventId'), event.get('eventid'), default='')}")])
     if rows:
         rows.append([InlineKeyboardButton("Refresh list", callback_data="watch:refresh")])
     return InlineKeyboardMarkup(rows) if rows else None
@@ -1841,7 +1849,7 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
         candidate = _active_market_candidate(context) or {}
         if isinstance(candidate, dict) and candidate:
             state = _active_trade_order_state(context) or {}
-            _set_trade_order_state(candidate, context=context, currency=currency, stage="amount", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"))
+            _set_trade_order_state(context, candidate, currency=currency, stage="amount", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"))
         _set_pending_interaction(context, "trade_amount", prompt="Send the amount now.")
         return CommandResult(False, "Send the amount now.", raw={"next_step": "amount", "currency": currency})
 
@@ -1857,7 +1865,7 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
             return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
         candidate = _active_market_candidate(context) or {}
         if isinstance(candidate, dict) and candidate:
-            _set_trade_order_state(candidate, context=context, amount=amount, stage="ready", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"), currency=state.get("currency"))
+            _set_trade_order_state(context, candidate, amount=amount, stage="ready", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"), currency=state.get("currency"))
         result = build_order_command(client, f"{amount:g} {_normalize_text(state.get('currency')).upper()}", context=context)
         if result.ok:
             _clear_pending_interaction(context)

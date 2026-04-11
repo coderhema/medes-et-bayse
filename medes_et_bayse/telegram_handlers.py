@@ -1414,9 +1414,61 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     else:
         if len(args) < 6:
             if use_active_context:
-                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nChoose an outcome and send the amount."
+                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}
+Choose an outcome and send the amount."
                 return CommandResult(False, prompt, raw={"next_step": "amount"})
 
+    if not isinstance(context_candidate, dict):
+        return CommandResult(False, "I need an active market before I can place that order.")
+    if not event_id or not market_id:
+        return CommandResult(False, "I need both an event and market before I can place that order.")
+    if not side:
+        return CommandResult(False, "Choose buy or sell before placing the order.")
+    if amount is None:
+        return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
+    if not currency:
+        return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
+    if not outcome_id:
+        outcome_id = _resolve_order_outcome_id(context_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+    if not outcome_id:
+        return CommandResult(False, "I couldn’t determine the outcome for this order.")
+
+    for token in trailing:
+        token_text = _normalize_text(token).upper()
+        if token_text in {"LIMIT", "MARKET"}:
+            order_type = token_text
+            continue
+        if price is None:
+            try:
+                price = float(token)
+                order_type = "LIMIT"
+            except ValueError:
+                continue
+
+    order_type = _normalize_text(order_type).upper() or "MARKET"
+    if order_type not in {"MARKET", "LIMIT"}:
+        order_type = "MARKET"
+    if price is not None and order_type != "LIMIT":
+        order_type = "LIMIT"
+
+    try:
+        response_payload = client.place_order(
+            event_id,
+            market_id,
+            outcome_id=outcome_id,
+            side=side,
+            amount=amount,
+            currency=currency,
+            order_type=order_type,
+            price=price,
+        )
+        response = OrderResponse.from_dict(response_payload)
+        return CommandResult(True, _order_text(response), raw=response.raw or response_payload)
+    except BayseClientError as exc:
+        return CommandResult(False, _error_text(exc))
+    except Exception as exc:
+        return CommandResult(False, f"Bayse API error
+message: {exc}")
 
 def build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
     active_candidate = _active_market_candidate(context)

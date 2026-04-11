@@ -1414,8 +1414,7 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     else:
         if len(args) < 6:
             if use_active_context:
-                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}
-Choose an outcome and send the amount."
+                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nChoose an outcome and send the amount."
                 return CommandResult(False, prompt, raw={"next_step": "amount"})
 
     if not isinstance(context_candidate, dict):

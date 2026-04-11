@@ -611,9 +611,31 @@ def _set_trade_order_state(context: Any, candidate: dict[str, Any], **fields: An
     state = data.get("trade_order_state")
     if not isinstance(state, dict):
         state = {}
+    event_id = _first_string(
+        candidate.get("event_id"),
+        candidate.get("eventId"),
+        candidate.get("eventid"),
+        state.get("event_id"),
+        state.get("eventId"),
+        state.get("eventid"),
+        default="",
+    )
+    market_id = _first_string(
+        candidate.get("market_id"),
+        candidate.get("marketId"),
+        candidate.get("marketid"),
+        state.get("market_id"),
+        state.get("marketId"),
+        state.get("marketid"),
+        default="",
+    )
     state.update({
-        "event_id": _first_string(candidate.get("event_id"), default=""),
-        "market_id": _first_string(candidate.get("market_id"), default=""),
+        "event_id": event_id,
+        "eventId": event_id,
+        "eventid": event_id,
+        "market_id": market_id,
+        "marketId": market_id,
+        "marketid": market_id,
         "event_title": _first_string(candidate.get("event_title"), default=""),
         "market_title": _first_string(candidate.get("market_title"), default=""),
         "outcome_id": _first_string(fields.get("outcome_id") or state.get("outcome_id"), default=""),
@@ -691,9 +713,15 @@ def _set_trade_selection(
     data = getattr(context, "user_data", None)
     if not isinstance(data, dict):
         return
+    event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
+    market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
     data["trade_selection"] = {
-        "event_id": _first_string(candidate.get("event_id"), default=""),
-        "market_id": _first_string(candidate.get("market_id"), default=""),
+        "event_id": event_id,
+        "eventId": event_id,
+        "eventid": event_id,
+        "market_id": market_id,
+        "marketId": market_id,
+        "marketid": market_id,
         "outcome_id": _first_string(outcome_id, default=""),
         "outcome_label": _first_string(outcome_label, default=""),
         "side": _normalize_text(side).lower(),
@@ -1246,42 +1274,64 @@ def build_quote_command(client: BayseClient, text: str, context: Any = None) -> 
 
     if payload is None:
         try:
-            payload = client.search_events(term, page=1, size=WATCHLIST_PAGE_SIZE, params={"status": "open"})
-        except BayseClientError as exc:
-            return CommandResult(False, _error_text(exc))
-        except Exception as exc:
-            return CommandResult(False, f"Bayse API error\nmessage: {exc}")
-
-    if isinstance(payload, dict) and isinstance(payload.get("markets"), list):
-        events = [payload]
-    else:
-        events = _extract_collection(payload)
-
-    candidates = _quote_candidates_from_events(events)
-    if not candidates:
-        return CommandResult(False, "No matching markets were returned by Bayse.")
-
-    raw = {"mode": "quote", "term": term, "events": events, "quote_candidates": candidates, "payload": payload}
-    return CommandResult(True, _quote_search_text(term, candidates), raw=raw)
-
-
-def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
+            payload def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     args = _split_args(text)
     active_candidate = _active_market_candidate(context)
     selected_trade = _active_trade_selection(context)
     order_state = _active_trade_order_state(context)
-    use_active_context = isinstance(active_candidate, dict) and bool(active_candidate.get("event_id")) and bool(active_candidate.get("market_id"))
+    context_candidate = active_candidate if isinstance(active_candidate, dict) else order_state if isinstance(order_state, dict) else selected_trade if isinstance(selected_trade, dict) else None
+    use_active_context = isinstance(context_candidate, dict) and bool(
+        _first_string(
+            context_candidate.get("event_id"),
+            context_candidate.get("eventId"),
+            context_candidate.get("eventid"),
+            order_state.get("event_id") if isinstance(order_state, dict) else None,
+            order_state.get("eventId") if isinstance(order_state, dict) else None,
+            order_state.get("eventid") if isinstance(order_state, dict) else None,
+            selected_trade.get("event_id") if isinstance(selected_trade, dict) else None,
+            selected_trade.get("eventId") if isinstance(selected_trade, dict) else None,
+            selected_trade.get("eventid") if isinstance(selected_trade, dict) else None,
+            default="",
+        )
+    ) and bool(
+        _first_string(
+            context_candidate.get("market_id"),
+            context_candidate.get("marketId"),
+            context_candidate.get("marketid"),
+            order_state.get("market_id") if isinstance(order_state, dict) else None,
+            order_state.get("marketId") if isinstance(order_state, dict) else None,
+            order_state.get("marketid") if isinstance(order_state, dict) else None,
+            selected_trade.get("market_id") if isinstance(selected_trade, dict) else None,
+            selected_trade.get("marketId") if isinstance(selected_trade, dict) else None,
+            selected_trade.get("marketid") if isinstance(selected_trade, dict) else None,
+            default="",
+        )
+    )
     outcome_text = ""
     outcome_id = ""
 
     event_id = _first_string(
-        active_candidate.get("event_id") if use_active_context else None,
-        active_candidate.get("eventId") if use_active_context else None,
+        context_candidate.get("event_id") if use_active_context and isinstance(context_candidate, dict) else None,
+        context_candidate.get("eventId") if use_active_context and isinstance(context_candidate, dict) else None,
+        context_candidate.get("eventid") if use_active_context and isinstance(context_candidate, dict) else None,
+        order_state.get("event_id") if use_active_context and isinstance(order_state, dict) else None,
+        order_state.get("eventId") if use_active_context and isinstance(order_state, dict) else None,
+        order_state.get("eventid") if use_active_context and isinstance(order_state, dict) else None,
+        selected_trade.get("event_id") if use_active_context and isinstance(selected_trade, dict) else None,
+        selected_trade.get("eventId") if use_active_context and isinstance(selected_trade, dict) else None,
+        selected_trade.get("eventid") if use_active_context and isinstance(selected_trade, dict) else None,
         default="",
     )
     market_id = _first_string(
-        active_candidate.get("market_id") if use_active_context else None,
-        active_candidate.get("marketId") if use_active_context else None,
+        context_candidate.get("market_id") if use_active_context and isinstance(context_candidate, dict) else None,
+        context_candidate.get("marketId") if use_active_context and isinstance(context_candidate, dict) else None,
+        context_candidate.get("marketid") if use_active_context and isinstance(context_candidate, dict) else None,
+        order_state.get("market_id") if use_active_context and isinstance(order_state, dict) else None,
+        order_state.get("marketId") if use_active_context and isinstance(order_state, dict) else None,
+        order_state.get("marketid") if use_active_context and isinstance(order_state, dict) else None,
+        selected_trade.get("market_id") if use_active_context and isinstance(selected_trade, dict) else None,
+        selected_trade.get("marketId") if use_active_context and isinstance(selected_trade, dict) else None,
+        selected_trade.get("marketid") if use_active_context and isinstance(selected_trade, dict) else None,
         default="",
     )
     side = _normalize_text((order_state or {}).get("side") or (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
@@ -1305,7 +1355,7 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
             return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
         currency = _normalize_text(args[1]).upper() or currency
         trailing = args[2:]
-        outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+        outcome_id = _resolve_order_outcome_id(context_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     elif use_active_context and len(args) >= 4:
         outcome_text = args[0]
         side = _normalize_text(args[1]).lower() or side
@@ -1315,7 +1365,7 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
             return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
         currency = _normalize_text(args[3]).upper() or currency
         trailing = args[4:]
-        outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+        outcome_id = _resolve_order_outcome_id(context_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     elif use_active_context:
         if not side:
             side = _normalize_text(order_state.get("side") if isinstance(order_state, dict) else "").lower()
@@ -1327,99 +1377,29 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         if not currency and isinstance(order_state, dict):
             currency = _normalize_text(order_state.get("currency")).upper()
         if not currency:
-            prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nChoose a currency to continue."
+            prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nChoose a currency to continue."
             _set_pending_interaction(context, "trade_currency", prompt=prompt)
-            return CommandResult(False, prompt, raw={"next_step": "currency", "active_market": active_candidate.get("market_id")})
+            return CommandResult(False, prompt, raw={"next_step": "currency", "active_market": context_candidate.get("market_id") if isinstance(context_candidate, dict) else None})
         if len(args) == 1:
             try:
                 amount = float(args[0])
             except ValueError:
                 return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
         elif len(args) == 0:
-            prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nSend the amount now."
+            prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nSend the amount now."
             _set_pending_interaction(context, "trade_amount", prompt=prompt)
-            return CommandResult(False, prompt, raw={"next_step": "amount", "active_market": active_candidate.get("market_id")})
+            return CommandResult(False, prompt, raw={"next_step": "amount", "active_market": context_candidate.get("market_id") if isinstance(context_candidate, dict) else None})
         else:
             try:
                 amount = float(args[0])
             except ValueError:
                 return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
             trailing = args[1:]
-        outcome_id = _resolve_order_outcome_id(active_candidate, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
+        outcome_id = _resolve_order_outcome_id(context_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
     else:
         if len(args) < 6:
             if use_active_context:
-                prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nChoose an outcome and side first."
-                return CommandResult(False, prompt)
-            return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
-        event_id = args[0]
-        market_id = args[1]
-        outcome_text = args[2]
-        side = args[3]
-        try:
-            amount = float(args[4])
-        except ValueError:
-            return CommandResult(False, "What order do you want to place? Send the event, market, outcome, side, amount, and currency.")
-        currency = args[5].upper()
-        trailing = args[6:]
-        outcome_id = outcome_text
-
-    if amount is None and len(args) >= 2 and use_active_context:
-        try:
-            amount = float(args[0])
-            currency = _normalize_text(args[1]).upper() or currency
-        except ValueError:
-            return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
-
-    if trailing:
-        trailing_value = trailing[0]
-        try:
-            price = float(trailing_value)
-            order_type = "LIMIT"
-            if len(trailing) >= 2:
-                order_type = trailing[1].upper()
-        except ValueError:
-            order_type = trailing_value.upper()
-            if order_type not in {"LIMIT", "MARKET"}:
-                return CommandResult(False, "What order do you want to place? Send outcome, buy|sell, amount, and currency.")
-            if order_type == "MARKET":
-                price = None
-
-    if not outcome_id:
-        outcome_id = _resolve_order_outcome_id(active_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
-    outcome_id = _normalize_text(outcome_id)
-    if not outcome_id:
-        outcome_id = _normalize_text((selected_trade or {}).get("outcome_id")).strip()
-    if not outcome_id:
-        return CommandResult(False, "Pick an outcome from the event first so I can place the order.", raw={"next_step": "outcome"})
-
-    if not side:
-        side = "buy" if _normalize_text(outcome_text).upper() == "YES" else "sell" if _normalize_text(outcome_text).upper() == "NO" else ""
-    if not side:
-        return CommandResult(False, "Choose Buy or Sell first.", raw={"next_step": "side"})
-
-    if amount is None:
-        if use_active_context:
-            prompt = f"Active market: {_safe_html(active_candidate.get('event_title') or '')} · {_safe_html(active_candidate.get('market_title') or '')}\nSend the amount now."
-            _set_pending_interaction(context, "trade_amount", prompt=prompt)
-            return CommandResult(False, prompt, raw={"next_step": "amount"})
-        return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
-
-    if not currency:
-        currency = _smart_trade_currency(active_candidate or {})
-
-    try:
-        response = client.place_order(event_id, market_id, outcome_id=outcome_id, side=side.upper(), amount=amount, currency=currency, order_type=order_type, price=price)
-        _clear_pending_interaction(context)
-        _clear_trade_order_state(context)
-        return CommandResult(True, _order_text(OrderResponse.from_dict(response)), raw=response)
-    except BayseClientError as exc:
-        return CommandResult(False, _error_text(exc))
-    except Exception as exc:
-        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
-
-
-def build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
+                prompt = f"Active market: {_safe_html(context_candidate.get('event_title') or '')} · {_safe_html(context_candidate.get('market_title') or '')}\nChoose an outcome and sdef build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
     active_candidate = _active_market_candidate(context)
     if not isinstance(active_candidate, dict) or not active_candidate.get("event_id") or not active_candidate.get("market_id"):
         return None
@@ -1456,7 +1436,7 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
         outcome = "YES" if side == "buy" else "NO"
 
     _set_trade_order_state(context, active_candidate, side=side, currency=currency, amount=amount, outcome_label=outcome, stage="ready")
-    synthetic_text = f"{outcome} {side} {amount:g} {currency}"
+    synthetic_text = f"{amount:g} {currency}"
     result = build_order_command(client, synthetic_text, context=context)
     if result.ok and isinstance(result.raw, dict):
         return CommandResult(result.ok, result.text, raw={**result.raw, "smart_trade": True, "smart_trade_source": text, "smart_trade_parsed": parsed})
@@ -1470,6 +1450,23 @@ def build_events_command(client: BayseClient, text: str = "") -> CommandResult:
     if term:
         heading = f"Search results for {_normalize_text(term)}"
         if term.lower() in KNOWN_EVENT_CATEGORIES:
+            params = {"category": term.lower(), "status": "open"}
+        else:
+            params = {"keyword": term, "status": "open"}
+    try:
+        payload = client.list_events(page=1, size=WATCHLIST_PAGE_SIZE, params=params)
+        events = _extract_collection(payload)
+        if not events:
+            return CommandResult(False, "No markets or events were returned by Bayse.")
+        raw = {"mode": "events", "term": term, "events": events, "payload": payload, "params": params}
+        return CommandResult(True, _events_text(events, heading=heading), raw=raw)
+    except BayseClientError as exc:
+        return CommandResult(False, _error_text(exc))
+    except Exception as exc:
+        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
+
+
+f term.lower() in KNOWN_EVENT_CATEGORIES:
             params = {"category": term.lower(), "status": "open"}
         else:
             params = {"keyword": term, "status": "open"}

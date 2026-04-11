@@ -1466,8 +1466,7 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
     except Exception as exc:
-        return CommandResult(False, f"Bayse API error
-message: {exc}")
+        return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 def build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
     active_candidate = _active_market_candidate(context)

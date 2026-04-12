@@ -19,7 +19,7 @@ def test_private_request_signs_query_string_path(monkeypatch: pytest.MonkeyPatch
             'X-Signature': 'sig',
         }
 
-    client._auth.sign = fake_sign  # type: ignore[assignment]
+    object.__setattr__(client._auth, 'sign', fake_sign)  # BayseAuth is frozen; bypass via object.__setattr__
 
     class FakeResponse:
         def __enter__(self):

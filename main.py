@@ -96,6 +96,7 @@ def build_application() -> Application:
     client = BayseClient(
         api_key=runtime_config.public_key,
         api_secret=runtime_config.secret_key,
+        user_id=runtime_config.user_id,
         base_url=runtime_config.base_url,
     )
 

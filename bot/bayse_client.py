@@ -156,7 +156,7 @@ class BayseClient:
         event_id: str,
         market_id: str,
         side: str,
-        outcome_id: str,
+        outcome: str,
         amount: float,
         currency: str = "USD",
         order_type: str = "MARKET",
@@ -167,10 +167,9 @@ class BayseClient:
         expires_at: Optional[str] = None,
     ) -> dict:
         body: dict[str, object] = {
+            "outcome": outcome.upper(),
             "side": side.upper(),
-            "outcomeId": outcome_id,
             "amount": round(float(amount), 2),
-            "type": order_type.upper(),
             "currency": currency,
         }
         if price is not None:
@@ -194,7 +193,7 @@ class BayseClient:
         event_id: str,
         market_id: str,
         *,
-        outcome_id: str,
+        outcome: str,
         side: str,
         amount: float,
         price: float,
@@ -206,7 +205,7 @@ class BayseClient:
         return self.place_order(
             event_id=event_id,
             market_id=market_id,
-            outcome_id=outcome_id,
+            outcome=outcome,
             side=side,
             amount=amount,
             currency=currency,

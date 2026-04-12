@@ -9,16 +9,15 @@ class StubClient:
     def __init__(self):
         self.calls = []
 
-    def place_order(self, event_id, market_id, *, outcome_id, side, amount, currency, order_type="LIMIT", price=None):
+    def place_order(self, event_id, market_id, *, outcome, side, amount, currency, price=None):
         self.calls.append(
             {
                 "event_id": event_id,
                 "market_id": market_id,
-                "outcome_id": outcome_id,
+                "outcome": outcome,
                 "side": side,
                 "amount": amount,
                 "currency": currency,
-                "order_type": order_type,
                 "price": price,
             }
         )
@@ -26,9 +25,8 @@ class StubClient:
             "orderId": "ord_123",
             "eventId": event_id,
             "marketId": market_id,
-            "outcomeId": outcome_id,
+            "outcome": outcome,
             "side": side,
-            "type": order_type,
             "status": "submitted",
             "amount": amount,
             "price": price,
@@ -104,11 +102,10 @@ def test_build_order_command_returns_result_instead_of_none():
         {
             "event_id": "evt_123",
             "market_id": "mkt_456",
-            "outcome_id": "out_yes",
+            "outcome": "YES",
             "side": "buy",
             "amount": 250.0,
             "currency": "NGN",
-            "order_type": "MARKET",
             "price": None,
         }
     ]
@@ -227,7 +224,7 @@ def test_trade_amount_reply_uses_canonical_ids_to_place_order():
     call = client.calls[0]
     assert call["event_id"] == "evt_123"
     assert call["market_id"] == "mkt_456"
-    assert call["outcome_id"] == "out_yes"
+    assert call["outcome"] == "YES"
     assert call["side"] == "buy"
     assert call["amount"] == 500.0
     assert call["currency"] == "NGN"

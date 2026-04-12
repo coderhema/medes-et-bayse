@@ -1526,38 +1526,24 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
     if not currency:
         return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
-    if not outcome_id:
-        outcome_id = _resolve_order_outcome_id(context_candidate or {}, outcome_text=outcome_text, side=side, selected_trade=selected_trade)
-    if not outcome_id:
-        return CommandResult(False, "I couldn’t determine the outcome for this order.")
+    if not outcome_text:
+        outcome_text = "YES" if side in {"buy", "long"} else "NO"
 
     for token in trailing:
-        token_text = _normalize_text(token).upper()
-        if token_text in {"LIMIT", "MARKET"}:
-            order_type = token_text
-            continue
         if price is None:
             try:
                 price = float(token)
-                order_type = "LIMIT"
             except ValueError:
                 continue
-
-    order_type = _normalize_text(order_type).upper() or "MARKET"
-    if order_type not in {"MARKET", "LIMIT"}:
-        order_type = "MARKET"
-    if price is not None and order_type != "LIMIT":
-        order_type = "LIMIT"
 
     try:
         response_payload = client.place_order(
             event_id,
             market_id,
-            outcome_id=outcome_id,
+            outcome=outcome_text.upper(),
             side=side,
             amount=amount,
             currency=currency,
-            order_type=order_type,
             price=price,
         )
         response = OrderResponse.from_dict(response_payload)

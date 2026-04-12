@@ -242,12 +242,15 @@ def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
         or signal.get("eventId")
         or ""
     ).strip()
-    outcome_id = str(signal.get("outcome_id") or signal.get("outcomeId") or side).strip()
+    outcome_label = str(signal.get("outcome_label") or signal.get("outcome") or "").strip().upper()
+    if not outcome_label:
+        raw_side = side.lower()
+        outcome_label = "YES" if raw_side in {"yes", "buy", "long"} else "NO"
     event_id = str(signal.get("event_id") or signal.get("eventId") or market_id).strip()
 
-    if side == "YES":
+    if side == "YES" or side == "BUY":
         price = signal.get("yes_price") or signal.get("market_prob") or signal.get("price")
-    elif side == "NO":
+    elif side == "NO" or side == "SELL":
         price = signal.get("no_price") or signal.get("market_prob") or signal.get("price")
     else:
         price = signal.get("price") or signal.get("market_prob")
@@ -256,7 +259,7 @@ def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
         price = 0.0
 
     currency = _env("BAYSE_CURRENCY", default="USD")
-    return event_id, market_id, outcome_id, currency, float(price)
+    return event_id, market_id, outcome_label, currency, float(price)
 
 
 def _format_trade_alert(trade: dict) -> str:
@@ -346,19 +349,19 @@ def run_cycle(
             + " USDC"
         )
         if not dry_run:
-            event_id, market_id, outcome_id, currency, price = _resolve_trade_args(signal)
-            if not market_id or not outcome_id:
+            event_id, market_id, outcome_label, currency, price = _resolve_trade_args(signal)
+            if not market_id or not outcome_label:
                 logger.warning(
                     f"Skipping live trade for {signal.get('event_title', 'unknown event')} because market/outcome identifiers are missing."
                 )
-                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing market_id/outcome_id"}})
+                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing market_id/outcome_label"}})
                 continue
 
             result = client.place_order(
                 event_id=event_id,
                 market_id=market_id,
                 side=str(signal["side"]),
-                outcome_id=outcome_id,
+                outcome=outcome_label,
                 price=price,
                 amount=float(signal["stake"]),
                 currency=currency,

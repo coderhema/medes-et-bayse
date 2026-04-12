@@ -55,7 +55,7 @@ class BayseClient:
 
     def _build_url(self, path: str, params: Optional[Mapping[str, Any]] = None) -> str:
         full_path = self._versioned_path(path)
-        url = f"{self.base_url.rstrip('/')}"{full_path}
+        url = f"{self.base_url.rstrip('/')}{full_path}"
         if params:
             query = parse.urlencode({k: v for k, v in params.items() if v is not None})
             url = f"{url}?{query}"
@@ -98,7 +98,7 @@ class BayseClient:
             query = parse.urlencode({k: v for k, v in params.items() if v is not None})
             request_path = f"{versioned_path}?{query}"
 
-        request_url = f"{self.base_url.rstrip('/')}"{request_path}
+        request_url = f"{self.base_url.rstrip('/')}{request_path}"
 
         if auth == "read":
             headers[self.api_key_header] = self.api_key

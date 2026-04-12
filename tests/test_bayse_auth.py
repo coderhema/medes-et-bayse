@@ -52,7 +52,7 @@ def test_client_passes_serialized_bytes_to_signer(monkeypatch: pytest.MonkeyPatc
             "X-Signature": "sig",
         }
 
-    client._auth.sign = fake_sign  # type: ignore[assignment]
+    object.__setattr__(client._auth, "sign", fake_sign)  # BayseAuth is frozen; bypass via object.__setattr__
 
     class FakeResponse:
         def __enter__(self):

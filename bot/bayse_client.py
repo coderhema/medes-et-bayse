@@ -156,8 +156,8 @@ class BayseClient:
         event_id: str,
         market_id: str,
         side: str,
-        outcome: str,
-        amount: float,
+        outcome_id: Optional[str] = None,
+        amount: float = 0.0,
         currency: str = "USD",
         order_type: str = "MARKET",
         price: Optional[float] = None,
@@ -165,9 +165,11 @@ class BayseClient:
         post_only: Optional[bool] = None,
         max_slippage: Optional[float] = None,
         expires_at: Optional[str] = None,
+        outcome: Optional[str] = None,
     ) -> dict:
+        resolved_outcome = str(outcome or outcome_id or side).upper()
         body: dict[str, object] = {
-            "outcome": outcome.upper(),
+            "outcome": resolved_outcome,
             "side": side.upper(),
             "amount": round(float(amount), 2),
             "currency": currency,
@@ -193,7 +195,8 @@ class BayseClient:
         event_id: str,
         market_id: str,
         *,
-        outcome: str,
+        outcome_id: Optional[str] = None,
+        outcome: Optional[str] = None,
         side: str,
         amount: float,
         price: float,
@@ -205,6 +208,7 @@ class BayseClient:
         return self.place_order(
             event_id=event_id,
             market_id=market_id,
+            outcome_id=outcome_id,
             outcome=outcome,
             side=side,
             amount=amount,

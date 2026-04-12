@@ -16,7 +16,7 @@ def _normalize_body(body: Any) -> str:
         return body.decode("utf-8")
     if isinstance(body, str):
         return body
-    return json.dumps(body, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    return json.dumps(body, separators=(",", ":"), sort_keys=True)
 
 
 def _body_hash(body: Any) -> str:
@@ -54,6 +54,9 @@ class BayseAuth:
         body: Any = None,
         timestamp: Optional[str] = None,
     ) -> MutableMapping[str, str]:
+        if not self.api_secret or not self.api_secret.strip():
+            raise ValueError("Bayse secret key is required for request signing")
+
         ts = timestamp or str(int(time.time()))
         canonical_request = build_canonical_request(method=method, path=path, timestamp=ts, body=body)
         signature = sign_hmac_sha256(self.api_secret, canonical_request, output=self.signature_encoding)

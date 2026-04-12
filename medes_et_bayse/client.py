@@ -91,16 +91,21 @@ class BayseClient:
             body_bytes = serialized_body
             body_for_signing = serialized_body
             headers["Content-Type"] = "application/json"
+
         versioned_path = self._versioned_path(path)
+        request_path = versioned_path
+        if params:
+            query = parse.urlencode({k: v for k, v in params.items() if v is not None})
+            request_path = f"{versioned_path}?{query}"
 
         if auth == "read":
             headers[self.api_key_header] = self.api_key
         elif auth == "private":
-            headers.update(self._auth.sign(method=method, path=versioned_path, body=body_for_signing))
+            headers.update(self._auth.sign(method=method, path=request_path, body=body_for_signing))
             if self.user_id:
                 headers.setdefault("X-User-Id", self.user_id)
         elif auth == "write":
-            headers.update(self._auth.sign(method=method, path=versioned_path, body=body_for_signing))
+            headers.update(self._auth.sign(method=method, path=request_path, body=body_for_signing))
             if self.user_id:
                 headers.setdefault("X-User-Id", self.user_id)
         elif auth == "session":
@@ -110,7 +115,7 @@ class BayseClient:
             headers.update(extra_headers)
 
         req = request.Request(
-            self._build_url(path, params=params),
+            f"{self.base_url.rstrip('/')}{request_path}",
             data=body_bytes,
             headers=headers,
             method=method.upper(),

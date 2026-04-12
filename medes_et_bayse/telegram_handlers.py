@@ -635,6 +635,9 @@ def _set_trade_order_state(context: Any, candidate: dict[str, Any], **fields: An
         default="",
     )
     state.update({
+        "candidate": candidate,
+        "event": candidate.get("event") if isinstance(candidate.get("event"), dict) else {},
+        "market": candidate.get("market") if isinstance(candidate.get("market"), dict) else {},
         "event_id": event_id,
         "eventId": event_id,
         "eventid": event_id,
@@ -721,6 +724,9 @@ def _set_trade_selection(
     event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
     market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
     data["trade_selection"] = {
+        "candidate": candidate,
+        "event": candidate.get("event") if isinstance(candidate.get("event"), dict) else {},
+        "market": candidate.get("market") if isinstance(candidate.get("market"), dict) else {},
         "event_id": event_id,
         "eventId": event_id,
         "eventid": event_id,
@@ -1084,6 +1090,49 @@ def _candidate_from_event_market(event: dict[str, Any], market: dict[str, Any]) 
     }
 
 
+def _candidate_from_state(state: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(state, dict):
+        return None
+    candidate = state.get("candidate")
+    if isinstance(candidate, dict):
+        event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
+        market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
+        if event_id and market_id:
+            return candidate
+    event_id = _first_string(state.get("event_id"), state.get("eventId"), state.get("eventid"), default="")
+    market_id = _first_string(state.get("market_id"), state.get("marketId"), state.get("marketid"), default="")
+    if not (event_id and market_id):
+        return None
+    rebuilt: dict[str, Any] = {
+        "event": state.get("event") if isinstance(state.get("event"), dict) else {},
+        "market": state.get("market") if isinstance(state.get("market"), dict) else {},
+        "event_title": _first_string(state.get("event_title"), state.get("eventTitle"), default=""),
+        "market_title": _first_string(state.get("market_title"), state.get("marketTitle"), default=""),
+        "yes_price": state.get("yes_price"),
+        "no_price": state.get("no_price"),
+        "event_id": event_id,
+        "eventId": event_id,
+        "eventid": event_id,
+        "market_id": market_id,
+        "marketId": market_id,
+        "marketid": market_id,
+        "outcome1_id": _first_string(state.get("outcome1_id"), default=""),
+        "outcome2_id": _first_string(state.get("outcome2_id"), default=""),
+        "currency": _normalize_text(state.get("currency")).upper(),
+        "status": _first_string(state.get("status"), default=""),
+    }
+    outcome_id = _first_string(state.get("outcome_id"), default="")
+    if outcome_id:
+        rebuilt["outcome_id"] = outcome_id
+    outcome_label = _first_string(state.get("outcome_label"), default="")
+    if outcome_label:
+        rebuilt["outcome_label"] = outcome_label
+    side = _normalize_text(state.get("side")).lower()
+    if side:
+        rebuilt["side"] = side
+    return rebuilt
+
+
 def _active_market_candidate(context: Any) -> Optional[dict[str, Any]]:
     if context is None:
         return None
@@ -1094,6 +1143,12 @@ def _active_market_candidate(context: Any) -> Optional[dict[str, Any]]:
     if isinstance(candidate, dict):
         return candidate
     candidate = data.get("active_quote")
+    if isinstance(candidate, dict):
+        return candidate
+    candidate = _candidate_from_state(data.get("trade_order_state"))
+    if isinstance(candidate, dict):
+        return candidate
+    candidate = _candidate_from_state(data.get("trade_selection"))
     if isinstance(candidate, dict):
         return candidate
     event = data.get("active_event")
@@ -1113,7 +1168,7 @@ def _trade_context_candidate(context: Any) -> Optional[dict[str, Any]]:
     if not isinstance(data, dict):
         return None
     for key in ("trade_order_state", "trade_selection"):
-        candidate = data.get(key)
+        candidate = _candidate_from_state(data.get(key))
         if isinstance(candidate, dict) and _first_string(candidate.get("event_id"), candidate.get("market_id"), default=""):
             return candidate
     event = data.get("active_event")
@@ -1315,6 +1370,8 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     active_candidate = _active_market_candidate(context)
     selected_trade = _active_trade_selection(context)
     order_state = _active_trade_order_state(context)
+    if not isinstance(selected_trade, dict) and isinstance(order_state, dict):
+        selected_trade = order_state
     context_candidate = active_candidate if isinstance(active_candidate, dict) else order_state if isinstance(order_state, dict) else selected_trade if isinstance(selected_trade, dict) else None
     use_active_context = isinstance(context_candidate, dict) and bool(
         _first_string(
@@ -1514,7 +1571,10 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     except (TypeError, ValueError):
         return CommandResult(False, "I couldn’t read the amount. Try something like ‘Buy Yes for 200 NGN’.")
 
+    order_state = _active_trade_order_state(context)
     selected_trade = _active_trade_selection(context)
+    if not isinstance(selected_trade, dict) and isinstance(order_state, dict):
+        selected_trade = order_state
     currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or _smart_trade_currency(active_candidate)).upper()
     if not currency:
         currency = _smart_trade_currency(active_candidate)

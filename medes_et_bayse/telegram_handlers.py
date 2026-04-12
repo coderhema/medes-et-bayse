@@ -1051,6 +1051,8 @@ def _quote_candidates_from_events(events: list[dict[str, Any]]) -> list[dict[str
         event_title = _event_title(event)
         for market in markets:
             yes_price, no_price = _market_yes_no_prices(market)
+            event_id = _first_string(event.get("id"), event.get("eventId"), event.get("eventid"), default="")
+            market_id = _first_string(market.get("id"), market.get("marketId"), market.get("marketid"), default="")
             candidates.append({
                 "event": event,
                 "market": market,
@@ -1058,8 +1060,12 @@ def _quote_candidates_from_events(events: list[dict[str, Any]]) -> list[dict[str
                 "market_title": _market_title(market),
                 "yes_price": yes_price,
                 "no_price": no_price,
-                "event_id": _first_string(event.get("id"), event.get("eventId"), default=""),
-                "market_id": _first_string(market.get("id"), market.get("marketId"), default=""),
+                "event_id": event_id,
+                "eventId": event_id,
+                "eventid": event_id,
+                "market_id": market_id,
+                "marketId": market_id,
+                "marketid": market_id,
                 "outcome1_id": _first_string(market.get("outcome1Id"), default=""),
                 "outcome2_id": _first_string(market.get("outcome2Id"), default=""),
                 "currency": _event_currency_label(event),
@@ -1179,12 +1185,27 @@ def _trade_context_candidate(context: Any) -> Optional[dict[str, Any]]:
             return candidate
     return None
 
+def _sync_candidate_ids(candidate: dict[str, Any]) -> None:
+    """Ensure event_id/eventId/eventid and market_id/marketId/marketid aliases stay in sync."""
+    event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
+    market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
+    if event_id:
+        candidate["event_id"] = event_id
+        candidate["eventId"] = event_id
+        candidate["eventid"] = event_id
+    if market_id:
+        candidate["market_id"] = market_id
+        candidate["marketId"] = market_id
+        candidate["marketid"] = market_id
+
+
 def _set_active_market_context(context: Any, candidate: dict[str, Any]) -> None:
     if context is None:
         return
     data = getattr(context, "user_data", None)
     if not isinstance(data, dict):
         return
+    _sync_candidate_ids(candidate)
     event = candidate.get("event") if isinstance(candidate.get("event"), dict) else None
     market = candidate.get("market") if isinstance(candidate.get("market"), dict) else None
     if isinstance(event, dict):
@@ -2391,22 +2412,39 @@ def watchlist_callback_handler_factory(client: BayseClient) -> Callable[[Any, An
                 await query.edit_message_text(preview, reply_markup=keyboard, parse_mode="HTML")
                 return
 
-            if prefix == "tradec":
-                currency = _normalize_text(selected_value).upper()
-                if currency not in {"NGN", "USD"}:
-                    await query.edit_message_text("Invalid currency selection.", parse_mode="HTML")
-                    return
-                state = _active_trade_order_state(context) or {}
-                selected_trade = _active_trade_selection(context)
-                outcome_id = _first_string(state.get("outcome_id") if isinstance(state, dict) else "", default="")
-                outcome_label = _first_string(state.get("outcome_label") if isinstance(state, dict) else (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else ""), default="")
-                side = _normalize_text(state.get("side") if isinstance(state, dict) else (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
-                _set_active_market_context(context, candidate)
-                _set_trade_order_state(context, candidate, outcome_id=outcome_id, outcome_label=outcome_label, side=side, currency=currency, stage="amount")
-                prompt = f"Active market: {_safe_html(candidate.get('event_title') or '')} · {_safe_html(candidate.get('market_title') or '')}\nCurrency: {_safe_html(currency)}\nSend the amount now."
-                _set_pending_interaction(context, "trade_amount", prompt=prompt)
-                await query.edit_message_text(prompt, parse_mode="HTML")
+        if prefix == "tradec":
+            callback_parts = data.split(":", 2)
+            tradec_candidate: Optional[dict[str, Any]] = None
+            if len(callback_parts) == 3:
+                _, view_key, currency_raw = callback_parts
+                trade_view = _trade_view_bucket(context).get(view_key)
+                if isinstance(trade_view, dict) and isinstance(trade_view.get("candidate"), dict):
+                    tradec_candidate = trade_view["candidate"]
+            elif len(callback_parts) == 2:
+                _, currency_raw = callback_parts
+            else:
+                await query.edit_message_text("Invalid currency selection.", parse_mode="HTML")
                 return
+            if not isinstance(tradec_candidate, dict):
+                tradec_candidate = _trade_context_candidate(context)
+            if not isinstance(tradec_candidate, dict):
+                await query.edit_message_text("No active trade context. Please select a market first.", parse_mode="HTML")
+                return
+            currency = _normalize_text(currency_raw).upper()
+            if currency not in {"NGN", "USD"}:
+                await query.edit_message_text("Invalid currency selection.", parse_mode="HTML")
+                return
+            state = _active_trade_order_state(context) or {}
+            selected_trade = _active_trade_selection(context)
+            outcome_id = _first_string(state.get("outcome_id") if isinstance(state, dict) else "", default="")
+            outcome_label = _first_string(state.get("outcome_label") if isinstance(state, dict) else (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else ""), default="")
+            side = _normalize_text(state.get("side") if isinstance(state, dict) else (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
+            _set_active_market_context(context, tradec_candidate)
+            _set_trade_order_state(context, tradec_candidate, outcome_id=outcome_id, outcome_label=outcome_label, side=side, currency=currency, stage="amount")
+            prompt = f"Active market: {_safe_html(tradec_candidate.get('event_title') or '')} · {_safe_html(tradec_candidate.get('market_title') or '')}\nCurrency: {_safe_html(currency)}\nSend the amount now."
+            _set_pending_interaction(context, "trade_amount", prompt=prompt)
+            await query.edit_message_text(prompt, parse_mode="HTML")
+            return
 
         if prefix == "quote":
             if selected == "refresh":

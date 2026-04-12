@@ -45,6 +45,11 @@ runtime_config = load_runtime_config()
 def build_client(config: BayseRuntimeConfig = runtime_config):
     from .client import BayseClient
 
+    if not config.public_key or not config.public_key.strip():
+        raise ValueError("Bayse public key is required")
+    if not config.secret_key or not config.secret_key.strip():
+        raise ValueError("Bayse secret key is required")
+
     return BayseClient(
         api_key=config.public_key,
         api_secret=config.secret_key,

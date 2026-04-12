@@ -1103,6 +1103,27 @@ def _active_market_candidate(context: Any) -> Optional[dict[str, Any]]:
     return None
 
 
+def _trade_context_candidate(context: Any) -> Optional[dict[str, Any]]:
+    candidate = _active_market_candidate(context)
+    if isinstance(candidate, dict) and _first_string(candidate.get("event_id"), candidate.get("market_id"), default=""):
+        return candidate
+    if context is None:
+        return None
+    data = getattr(context, "user_data", None)
+    if not isinstance(data, dict):
+        return None
+    for key in ("trade_order_state", "trade_selection"):
+        candidate = data.get(key)
+        if isinstance(candidate, dict) and _first_string(candidate.get("event_id"), candidate.get("market_id"), default=""):
+            return candidate
+    event = data.get("active_event")
+    market = data.get("active_market")
+    if isinstance(event, dict) and isinstance(market, dict):
+        candidate = _candidate_from_event_market(event, market)
+        if _first_string(candidate.get("event_id"), candidate.get("market_id"), default=""):
+            return candidate
+    return None
+
 def _set_active_market_context(context: Any, candidate: dict[str, Any]) -> None:
     if context is None:
         return
@@ -1260,7 +1281,7 @@ def build_withdraw_command(client: Optional[BayseClient] = None, text: str = "")
 
 def build_quote_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     term = _search_term_after(text, QUOTE_STOP_WORDS)
-    active_candidate = _active_market_candidate(context)
+    active_candidate = _trade_context_candidate(context)
     if not term and active_candidate:
         market_id = active_candidate.get("market_id")
         if market_id:
@@ -1469,7 +1490,7 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         return CommandResult(False, f"Bayse API error\nmessage: {exc}")
 
 def build_smart_trade_command(client: BayseClient, text: str, context: Any = None) -> Optional[CommandResult]:
-    active_candidate = _active_market_candidate(context)
+    active_candidate = _trade_context_candidate(context)
     if not isinstance(active_candidate, dict) or not active_candidate.get("event_id") or not active_candidate.get("market_id"):
         return None
     if not _looks_like_smart_trade_intent(text):
@@ -1901,7 +1922,7 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
         currency = _normalize_text(text_value).upper()
         if currency not in {"NGN", "USD"}:
             return CommandResult(False, "Choose NGN or USD to continue.", raw={"next_step": "currency"})
-        candidate = _active_market_candidate(context) or {}
+        candidate = _trade_context_candidate(context) or {}
         if isinstance(candidate, dict) and candidate:
             state = _active_trade_order_state(context) or {}
             _set_trade_order_state(context, candidate, currency=currency, stage="amount", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"))
@@ -1918,7 +1939,7 @@ def _route_pending_interaction(client: BayseClient, context: Any, text: str) -> 
             amount = float(text_value)
         except ValueError:
             return CommandResult(False, "Send the amount as a number, like 200.", raw={"next_step": "amount"})
-        candidate = _active_market_candidate(context) or {}
+        candidate = _trade_context_candidate(context) or {}
         if isinstance(candidate, dict) and candidate:
             _set_trade_order_state(context, candidate, amount=amount, stage="ready", outcome_id=state.get("outcome_id"), outcome_label=state.get("outcome_label"), side=state.get("side"), currency=state.get("currency"))
         result = build_order_command(client, f"{amount:g} {_normalize_text(state.get('currency')).upper()}", context=context)
@@ -2032,7 +2053,7 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
         if not result.ok:
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
             if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency":
-                candidate = _active_market_candidate(context) or {}
+                candidate = _trade_context_candidate(context) or {}
                 reply_text = result.text
                 if isinstance(candidate, dict) and candidate:
                     reply_text = _trade_currency_prompt_text(candidate)
@@ -2135,7 +2156,7 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         if message is None:
             return
         text = getattr(message, "text", "") or ""
-        active_candidate = _active_market_candidate(context)
+        active_candidate = _trade_context_candidate(context)
         smart_result = build_smart_trade_command(client, text, context=context)
         if smart_result is not None:
             if not smart_result.ok:

@@ -17,7 +17,8 @@ from bot.poke_client import PokeClient
 from bot.realtime_feed import QuoteManager
 from bot.strategies.arbitrage import ArbitrageStrategy
 from bot.strategies.kelly import KellyStrategy
-from bot.strategies.market_maker import MarketMakerStrategy
+from bot.strategies.market_maker import MarketMakerStrategy, extract_inventory_units
+from bot.strategies.spread_capture import SpreadCaptureEngine
 
 try:
     from bot.telegram_handler import build_telegram_handler_from_env
@@ -76,6 +77,119 @@ def _attach_live_quotes(events: list[dict], quote_manager: Optional[QuoteManager
             "source": update.source,
         }
         event["liveQuoteAgeSeconds"] = quote_manager.quote_age_seconds(market_id)
+
+
+def _yes_outcome_id_from_event(event: dict) -> str:
+    """Extract the YES outcome ID from an event dict using common key patterns."""
+    for key in ('yesOutcomeId', 'yes_outcome_id', 'outcomeId', 'outcome_id'):
+        value = event.get(key)
+        if value:
+            return str(value).strip()
+    market = event.get('market')
+    if isinstance(market, dict):
+        for key in ('yesOutcomeId', 'yes_outcome_id', 'outcomeId', 'outcome_id'):
+            value = market.get(key)
+            if value:
+                return str(value).strip()
+        outcomes = market.get('outcomes') or market.get('options')
+        if isinstance(outcomes, list):
+            for outcome in outcomes:
+                if not isinstance(outcome, dict):
+                    continue
+                label = str(outcome.get('label') or outcome.get('name') or outcome.get('title') or '').strip().lower()
+                if label in {'yes', 'y', 'true'}:
+                    outcome_id = outcome.get('id') or outcome.get('outcomeId') or outcome.get('outcome_id')
+                    if outcome_id:
+                        return str(outcome_id).strip()
+    return ''
+
+
+def _extract_mid_from_update(update: Any) -> Optional[float]:
+    """Derive a mid-price from a MarketQuoteUpdate (WebSocket feed snapshot)."""
+    if update is None:
+        return None
+    bid = update.bid
+    ask = update.ask
+    if bid is not None and ask is not None and ask >= bid:
+        return (bid + ask) / 2.0
+    if update.midpoint is not None:
+        return float(update.midpoint)
+    return None
+
+
+def run_spread_capture_cycle(
+    client: BayseClient,
+    engine: SpreadCaptureEngine,
+    quote_manager: QuoteManager,
+    series_slug: str,
+    *,
+    dry_run: bool = True,
+    currency: str = 'USD',
+) -> None:
+    """One iteration of the spread-capture quote-refresh loop.
+
+    Steps:
+    1. Discover the active series market.
+    2. Subscribe the orderbook feed and derive the current mid-price
+       (WebSocket snapshot first, REST orderbook fallback).
+    3. Load the current portfolio to compute inventory.
+    4. Call ``engine.refresh_quotes`` — cancels stale orders and places fresh ones
+       only when the mid has moved beyond ``reprice_threshold``.
+    5. Burn matched YES/NO pairs to recycle USD capital.
+    """
+    event = engine.discover_series_market(series_slug)
+    if event is None:
+        logger.info('[SC] No active market found for series {!r}', series_slug)
+        return
+
+    market_id = _market_id_from_event(event)
+    event_id = str(event.get('id') or event.get('eventId') or '').strip()
+    outcome_id = _yes_outcome_id_from_event(event)
+    title = str(event.get('title') or event.get('name') or market_id).strip()
+
+    if not market_id or not event_id:
+        logger.warning('[SC] Cannot resolve market/event ID from series market {!r}', series_slug)
+        return
+
+    # Subscribe the real-time orderbook feed for this market
+    quote_manager.feed.subscribe_market(market_id, event_id=event_id)
+
+    # Derive mid-price: WebSocket snapshot first, REST fallback
+    update = quote_manager.latest_for_market(market_id)
+    mid_price = _extract_mid_from_update(update)
+    if mid_price is None:
+        mid_price = engine.get_mid_price(market_id)
+
+    # Fetch inventory
+    inventory_units = 0.0
+    try:
+        portfolio = client.get_portfolio()
+        inventory_units = extract_inventory_units(
+            portfolio, event_id=event_id, market_id=market_id, outcome_id=outcome_id
+        )
+    except Exception as exc:
+        logger.warning('[SC] Portfolio unavailable for inventory calc: {}', exc)
+
+    logger.info(
+        '[SC] {} | series={!r} | mid={} | inventory={:.4f}',
+        title, series_slug, f'{mid_price:.4f}' if mid_price is not None else 'n/a', inventory_units,
+    )
+
+    results = engine.refresh_quotes(
+        event,
+        mid_price,
+        inventory_units=inventory_units,
+        event_id=event_id,
+        market_id=market_id,
+        outcome_id=outcome_id,
+        currency=currency,
+    )
+    if results:
+        logger.info('[SC] {} quote action(s) for {}', len(results), market_id)
+
+    # Burn matched YES/NO pairs to recycle USD capital
+    if not dry_run:
+        engine.burn_pairs(market_id, quantity=1)
 
 
 
@@ -322,6 +436,7 @@ def main():
     parser.add_argument("--scan-only", action="store_true", help="Scan markets and log signals without placing trades")
     parser.add_argument("--strategy", choices=["kelly", "arbitrage", "market-making", "all"], default="all", help="Strategy to run")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
+    parser.add_argument("--series", default="", help="Series slug for spread-capture market-maker (e.g. nfl-sunday-showcase)")
     args = parser.parse_args()
 
     dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -372,6 +487,23 @@ def main():
 
     strategies = strategy_map[args.strategy]
 
+    # Spread-capture engine (optional; activated with --series or SERIES_SLUG env)
+    series_slug = args.series or _env("SERIES_SLUG")
+    spread_engine: Optional[SpreadCaptureEngine] = None
+    if series_slug:
+        spread_engine = SpreadCaptureEngine(
+            client,
+            bankroll=bankroll,
+            half_spread=float(os.getenv("SC_HALF_SPREAD", "0.02")),
+            order_size=float(os.getenv("SC_ORDER_SIZE", "10.0")),
+            reprice_threshold=float(os.getenv("SC_REPRICE_THRESHOLD", "0.005")),
+            pre_close_seconds=float(os.getenv("SC_PRE_CLOSE_SECONDS", "300")),
+            inventory_skew=float(os.getenv("SC_INVENTORY_SKEW", "0.60")),
+            max_position_fraction=max_position_fraction,
+            dry_run=dry_run,
+        )
+        logger.info(f"Spread-capture engine enabled for series {series_slug!r}")
+
     if not args.scan_only:
         quote_manager.start()
         logger.info("Realtime quote management enabled")
@@ -386,6 +518,8 @@ def main():
             while True:
                 try:
                     run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager, quote_currency=quote_currency)
+                    if spread_engine is not None:
+                        run_spread_capture_cycle(client, spread_engine, quote_manager, series_slug, dry_run=dry_run, currency=quote_currency)
                 except Exception as e:
                     logger.error(f"Cycle error: {e}")
                     _notify(poke, f"medes-et-bayse ERROR: {e}", level="error")
@@ -395,6 +529,8 @@ def main():
             quote_manager.stop()
     else:
         run_cycle(client, poke, strategies, dry_run=dry_run, bayse_user_id=bayse_user_id, quote_manager=quote_manager, quote_currency=quote_currency)
+        if spread_engine is not None:
+            run_spread_capture_cycle(client, spread_engine, quote_manager, series_slug, dry_run=dry_run, currency=quote_currency)
         quote_manager.stop()
 
 

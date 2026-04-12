@@ -44,6 +44,12 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _outcome_label(side_or_label: str) -> str:
+    """Normalize a side or outcome label to 'YES' or 'NO'."""
+    normalized = _normalize_text(side_or_label).upper()
+    return "YES" if normalized in {"YES", "BUY", "LONG"} else "NO"
+
+
 def _detail_store(context: Any) -> dict[str, str]:
     if context is None:
         return {}
@@ -784,7 +790,7 @@ class TelegramHandler:
         event_id = self._first_value(named, positional, ["event_id", "eventid"], 0)
         market_id = self._first_value(named, positional, ["market_id", "marketid"], 1)
         side = self._first_value(named, positional, ["side"], 2, "BUY")
-        outcome_id = self._first_value(named, positional, ["outcome_id", "outcomeid"], 3)
+        outcome_id = self._first_value(named, positional, ["outcome", "outcome_id", "outcomeid"], 3)
         amount_raw = self._first_value(named, positional, ["amount"], 4)
         currency = self._first_value(named, positional, ["currency"], 5, "USD")
         order_type = self._first_value(named, positional, ["type", "order_type"], 6, "MARKET")
@@ -805,13 +811,14 @@ class TelegramHandler:
             if post_only_raw:
                 post_only = post_only_raw.lower() in {"1", "true", "yes", "y"}
             max_slippage = float(max_slippage_raw) if max_slippage_raw else None
+            outcome = _outcome_label(outcome_id or side)
 
             result = await asyncio.to_thread(
                 client.place_order,
                 event_id,
                 market_id,
                 side,
-                outcome_id,
+                outcome,
                 amount,
                 currency,
                 order_type,
@@ -823,7 +830,7 @@ class TelegramHandler:
             )
             text = self._format_order(result)
             self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, currency=currency, side=side)
-            view_key = _detail_key("order", f"{event_id}:{market_id}:{outcome_id}:{amount}:{currency}:{order_type}")
+            view_key = _detail_key("order", f"{event_id}:{market_id}:{outcome}:{amount}:{currency}:{order_type}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:
             text = f"Error placing order: {e}\n\n{self._usage_order()}"
@@ -864,7 +871,7 @@ class TelegramHandler:
                     active["event_id"],
                     active["market_id"],
                     side,
-                    active["outcome_id"],
+                    _outcome_label(side),
                     amount,
                     active["currency"],
                     "MARKET",
@@ -873,7 +880,7 @@ class TelegramHandler:
                 reply_text = self._format_order(result)
                 view_key = _detail_key(
                     "buy",
-                    f"{active['event_id']}:{active['market_id']}:{active['outcome_id']}:{amount}:{active['currency']}",
+                    f"{active['event_id']}:{active['market_id']}:{_outcome_label(side)}:{amount}:{active['currency']}",
                 )
                 reply_text, keyboard = self._format_with_view_more(context, reply_text, view_key=view_key)
             except Exception as e:
@@ -904,17 +911,14 @@ class TelegramHandler:
             )
             return
         currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or active.get("currency") or "USD").upper()
-        outcome_id = _normalize_text(parsed.get("outcome_id") or active.get("outcome_id"))
-        if not outcome_id:
-            await message.reply_text("I need an active market outcome first. Use /quote to set one.", parse_mode="HTML")
-            return
+        outcome = _outcome_label(parsed.get("outcome") or parsed.get("side") or active.get("side") or side)
         try:
             result = await asyncio.to_thread(
                 self._require_client().place_order,
                 active["event_id"],
                 active["market_id"],
                 side,
-                outcome_id,
+                outcome,
                 amount,
                 currency,
                 "MARKET",
@@ -925,7 +929,7 @@ class TelegramHandler:
                 None,
             )
             text = self._format_order(result)
-            self._store_active_context(context, event_id=active["event_id"], market_id=active["market_id"], outcome_id=outcome_id, currency=currency, side=side)
+            self._store_active_context(context, event_id=active["event_id"], market_id=active["market_id"], outcome_id=outcome, currency=currency, side=side)
             view_key = _detail_key("smart-trade", f"{active['event_id']}:{active['market_id']}:{outcome_id}:{amount}:{currency}:{side}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:

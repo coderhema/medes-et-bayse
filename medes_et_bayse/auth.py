@@ -5,8 +5,12 @@ import dataclasses
 import hashlib
 import hmac
 import json
+import logging
 import time
 from typing import Any, Mapping, MutableMapping, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_body(body: Any) -> str:
@@ -24,6 +28,21 @@ def _body_hash(body: Any) -> str:
     if normalized == "":
         return ""
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _normalize_timestamp(timestamp: Optional[str]) -> str:
+    if timestamp is None:
+        return str(int(time.time()))
+
+    raw = str(timestamp).strip()
+    try:
+        normalized = str(int(float(raw)))
+    except (TypeError, ValueError):
+        return raw
+
+    if raw != normalized:
+        logger.debug("Normalized Bayse X-Timestamp from %s to %s", raw, normalized)
+    return normalized
 
 
 def build_canonical_request(method: str, path: str, timestamp: str, body: Any = None) -> str:
@@ -57,9 +76,18 @@ class BayseAuth:
         if not self.api_secret or not self.api_secret.strip():
             raise ValueError("Bayse secret key is required for request signing")
 
-        ts = timestamp or str(int(time.time()))
-        canonical_request = build_canonical_request(method=method, path=path, timestamp=ts, body=body)
+        ts = _normalize_timestamp(timestamp)
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        body_hash = _body_hash(body)
+        canonical_request = f"{ts}.{method.upper()}.{normalized_path}.{body_hash}"
+
+        logger.debug("Bayse X-Timestamp=%s", ts)
+        logger.debug("Bayse body_hash=%s", body_hash)
+        logger.debug("Bayse string_to_sign=%s", canonical_request)
+
         signature = sign_hmac_sha256(self.api_secret, canonical_request, output=self.signature_encoding)
+        logger.debug("Bayse X-Signature=%s", signature)
+
         return {
             self.api_key_header: self.api_key,
             self.timestamp_header: ts,

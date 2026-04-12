@@ -55,7 +55,7 @@ class BayseClient:
 
     def _build_url(self, path: str, params: Optional[Mapping[str, Any]] = None) -> str:
         full_path = self._versioned_path(path)
-        url = f"{self.base_url.rstrip('/')}{full_path}"
+        url = f"{self.base_url.rstrip('/')}"{full_path}
         if params:
             query = parse.urlencode({k: v for k, v in params.items() if v is not None})
             url = f"{url}?{query}"
@@ -98,24 +98,31 @@ class BayseClient:
             query = parse.urlencode({k: v for k, v in params.items() if v is not None})
             request_path = f"{versioned_path}?{query}"
 
+        request_url = f"{self.base_url.rstrip('/')}"{request_path}
+
         if auth == "read":
             headers[self.api_key_header] = self.api_key
         elif auth == "private":
+            logger.debug("Bayse authenticated request method=%s url=%s auth=%s", method.upper(), request_url, auth)
             headers.update(self._auth.sign(method=method, path=request_path, body=body_for_signing))
             if self.user_id:
                 headers.setdefault("X-User-Id", self.user_id)
         elif auth == "write":
+            logger.debug("Bayse authenticated request method=%s url=%s auth=%s", method.upper(), request_url, auth)
             headers.update(self._auth.sign(method=method, path=request_path, body=body_for_signing))
             if self.user_id:
                 headers.setdefault("X-User-Id", self.user_id)
         elif auth == "session":
             raise ValueError("session auth requires explicit session headers")
 
+        if auth == "read":
+            logger.debug("Bayse authenticated request method=%s url=%s auth=%s", method.upper(), request_url, auth)
+
         if extra_headers:
             headers.update(extra_headers)
 
         req = request.Request(
-            f"{self.base_url.rstrip('/')}{request_path}",
+            request_url,
             data=body_bytes,
             headers=headers,
             method=method.upper(),

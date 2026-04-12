@@ -87,7 +87,7 @@ class BayseClient:
         headers: Dict[str, str] = {"Accept": "application/json"}
 
         if json_body is not None:
-            body_for_signing = json_body
+            body_for_signing = body_bytes
             body_bytes = json.dumps(json_body, separators=(",", ":"), sort_keys=True).encode("utf-8")
             headers["Content-Type"] = "application/json"
 

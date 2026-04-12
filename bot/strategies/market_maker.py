@@ -119,6 +119,7 @@ class MarketMakerStrategy:
             'fair_value': round(fair_value, 4),
             'observed_edge': round(observed_edge, 4),
             'half_spread': round(half_spread, 4),
+            'spread': round(half_spread * 2, 4),
             'bid_price': round(bid_price, 4),
             'ask_price': round(ask_price, 4),
             'inventory_units': round(inventory_units, 4),
@@ -328,3 +329,20 @@ class MarketMakerStrategy:
 
     def _clamp(self, value: float, minimum: float, maximum: float) -> float:
         return max(minimum, min(maximum, value))
+
+
+def extract_inventory_units(
+    portfolio: Any,
+    *,
+    event_id: str = '',
+    market_id: str = '',
+    outcome_id: str = '',
+) -> float:
+    """Return the signed inventory in YES-outcome units for the given market.
+
+    Positive values indicate a long position; negative values indicate short.
+    This is a convenience wrapper around :meth:`MarketMakerStrategy._inventory_units`
+    that can be called without constructing a full strategy instance.
+    """
+    mm = MarketMakerStrategy(bankroll=1.0)
+    return mm._inventory_units(portfolio, event_id=event_id, market_id=market_id, outcome_id=outcome_id)

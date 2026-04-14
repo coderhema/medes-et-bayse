@@ -1121,15 +1121,15 @@ class TelegramHandler:
             )
             return
         currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or active.get("currency") or "USD").upper()
-        outcome = _outcome_label(parsed.get("outcome") or parsed.get("side") or active.get("side") or side)
+        outcome_label = _outcome_label(parsed.get("outcome") or parsed.get("side") or active.get("side") or side)
         event_id = _normalize_text(active.get("event_id"))
         market_id = _normalize_text(active.get("market_id"))
-        if self._is_suspicious_event_id(event_id, market_id, outcome):
+        if self._is_suspicious_event_id(event_id, market_id, outcome_label):
             logger.warning(
                 "Blocking place_order due to suspicious canonical IDs eventId=%r marketId=%r outcomeId=%r",
                 event_id,
                 market_id,
-                outcome,
+                outcome_label,
             )
             await message.reply_text(
                 "I couldn't verify the active event ID. Please re-select the market with /events before placing that order.",
@@ -1141,7 +1141,7 @@ class TelegramHandler:
                 "place_order canonical identifiers: eventId=%s marketId=%s outcomeId=%s side=%s amount=%s currency=%s",
                 event_id,
                 market_id,
-                outcome,
+                outcome_label,
                 side,
                 amount,
                 currency,
@@ -1151,7 +1151,7 @@ class TelegramHandler:
                 event_id,
                 market_id,
                 side,
-                outcome,
+                outcome_label,
                 amount,
                 currency,
                 "MARKET",
@@ -1175,8 +1175,8 @@ class TelegramHandler:
                 text = _format_order_receipt(result)
             else:
                 text = self._format_order(result)
-            self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome, currency=currency, side=side)
-            view_key = _detail_key("smart-trade", f"{event_id}:{market_id}:{outcome}:{amount}:{currency}:{side}")
+            self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_label, currency=currency, side=side)
+            view_key = _detail_key("smart-trade", f"{event_id}:{market_id}:{outcome_label}:{amount}:{currency}:{side}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:
             text, keyboard = f"Error placing smart trade: {e}", None

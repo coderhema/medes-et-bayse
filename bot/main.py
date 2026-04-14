@@ -385,7 +385,11 @@ def run_cycle(
                 continue
             if _is_suspicious_event_id(event_id, market_id, outcome_label):
                 logger.warning(
-                    f"Skipping live trade for {signal.get('event_title', 'unknown event')} because event_id={event_id!r} is suspicious for market_id={market_id!r} outcome_id={outcome_label!r}."
+                    "Skipping live trade for {} because event_id={} is suspicious for market_id={} outcome_id={}.",
+                    signal.get("event_title", "unknown event"),
+                    event_id,
+                    market_id,
+                    outcome_label,
                 )
                 executed.append({**signal, "trade_result": {"skipped": True, "reason": "suspicious_event_id"}})
                 continue

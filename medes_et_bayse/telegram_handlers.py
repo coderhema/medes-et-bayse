@@ -402,29 +402,24 @@ def _is_empty_order_response(response: "OrderResponse") -> bool:
     order = response.order
     raw = response.raw or {}
     has_id = bool(order.order_id)
-    has_status = bool(
-        order.status
-        or _deep_mapping_value(raw, "status")
-        or _deep_mapping_value(raw, "state")
-        or _deep_mapping_value(raw, "order", "status")
-        or _deep_mapping_value(raw, "order", "state")
-    ) and not _is_placeholder_order_value(
+    resolved_status = (
         order.status
         or _deep_mapping_value(raw, "status")
         or _deep_mapping_value(raw, "state")
         or _deep_mapping_value(raw, "order", "status")
         or _deep_mapping_value(raw, "order", "state")
     )
-    has_side = bool(
+    has_status = bool(resolved_status) and not _is_placeholder_order_value(
+        resolved_status
+    )
+    resolved_side = (
         order.side
         or _deep_mapping_value(raw, "side")
         or _deep_mapping_value(raw, "direction")
         or _deep_mapping_value(raw, "order", "side")
-    ) and not _is_placeholder_order_value(
-        order.side
-        or _deep_mapping_value(raw, "side")
-        or _deep_mapping_value(raw, "direction")
-        or _deep_mapping_value(raw, "order", "side")
+    )
+    has_side = bool(resolved_side) and not _is_placeholder_order_value(
+        resolved_side
     )
     has_amount = bool(
         order.amount

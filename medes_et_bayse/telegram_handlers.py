@@ -87,6 +87,36 @@ def _mapping_value(mapping: Any, *path: str) -> Any:
     return current
 
 
+def _deep_mapping_value(mapping: Any, *path: str) -> Any:
+    if not path:
+        return mapping
+    if not isinstance(mapping, dict):
+        return None
+
+    head, *tail = path
+    if head in mapping:
+        value = mapping.get(head)
+        if not tail:
+            return value
+        resolved = _deep_mapping_value(value, *tail)
+        if resolved is not None:
+            return resolved
+
+    for nested_key in ("data", "result", "order", "quote", "payload", "response", "body", "details", "item"):
+        nested = mapping.get(nested_key)
+        if isinstance(nested, dict):
+            resolved = _deep_mapping_value(nested, *path)
+            if resolved is not None:
+                return resolved
+        elif isinstance(nested, list):
+            for item in nested:
+                if isinstance(item, dict):
+                    resolved = _deep_mapping_value(item, *path)
+                    if resolved is not None:
+                        return resolved
+    return None
+
+
 def _format_number(value: Any) -> str:
     if value is None:
         return "n/a"
@@ -151,8 +181,8 @@ def _label_from_payload(payload: Any, default: str = "Untitled market") -> str:
         payload.get("market_title"),
         payload.get("marketLabel"),
         payload.get("market_label"),
-        payload.get("label"),
         payload.get("symbol"),
+        payload.get("label"),
         default=default,
     )
 
@@ -232,38 +262,83 @@ def _order_text(response: OrderResponse) -> str:
     parts = [f"{emoji} <b>Order update</b>" if emoji else "<b>Order update</b>"]
 
     event_title = _first_string(
-        _mapping_value(raw, "event", "metadata", "name"),
-        _mapping_value(raw, "event", "metadata", "title"),
-        _mapping_value(raw, "event", "name"),
-        _mapping_value(raw, "event", "title"),
+        _deep_mapping_value(raw, "event", "metadata", "name"),
+        _deep_mapping_value(raw, "event", "metadata", "title"),
+        _deep_mapping_value(raw, "event", "name"),
+        _deep_mapping_value(raw, "event", "title"),
+        _deep_mapping_value(raw, "metadata", "name"),
+        _deep_mapping_value(raw, "metadata", "title"),
         raw.get("eventTitle"),
     )
     market_title = _first_string(
-        _mapping_value(raw, "market", "metadata", "name"),
-        _mapping_value(raw, "market", "metadata", "title"),
-        _mapping_value(raw, "market", "name"),
-        _mapping_value(raw, "market", "title"),
+        _deep_mapping_value(raw, "market", "metadata", "name"),
+        _deep_mapping_value(raw, "market", "metadata", "title"),
+        _deep_mapping_value(raw, "market", "name"),
+        _deep_mapping_value(raw, "market", "title"),
+        _deep_mapping_value(raw, "market", "marketTitle"),
         raw.get("marketTitle"),
+        raw.get("marketName"),
     )
     if event_title:
         parts.append(f"Event: {_bold(event_title)}")
     if market_title:
         parts.append(f"Market: {_bold(market_title)}")
 
+    status = _first_string(
+        order.status,
+        _deep_mapping_value(raw, "status"),
+        _deep_mapping_value(raw, "state"),
+        _deep_mapping_value(raw, "order", "status"),
+        _deep_mapping_value(raw, "order", "state"),
+        default="n/a",
+    )
+    side = _first_string(
+        order.side,
+        _deep_mapping_value(raw, "side"),
+        _deep_mapping_value(raw, "direction"),
+        _deep_mapping_value(raw, "order", "side"),
+        _deep_mapping_value(raw, "order", "direction"),
+        default="n/a",
+    )
+    order_type = _first_string(
+        order.order_type,
+        _deep_mapping_value(raw, "type"),
+        _deep_mapping_value(raw, "orderType"),
+        _deep_mapping_value(raw, "order", "type"),
+        _deep_mapping_value(raw, "order", "orderType"),
+        default="n/a",
+    )
+    outcome = _first_string(
+        _deep_mapping_value(raw, "outcome"),
+        _deep_mapping_value(raw, "outcomeId"),
+        _deep_mapping_value(raw, "outcome_id"),
+        _deep_mapping_value(raw, "outcomeIndex"),
+        _deep_mapping_value(raw, "order", "outcome"),
+        _deep_mapping_value(raw, "order", "outcomeId"),
+        _deep_mapping_value(raw, "order", "outcome_id"),
+        default="n/a",
+    )
+    amount_value = order.amount or _deep_mapping_value(raw, "amount") or _deep_mapping_value(raw, "order", "amount") or order.quantity or _deep_mapping_value(raw, "quantity") or _deep_mapping_value(raw, "order", "quantity")
+    price_value = order.limit_price or _deep_mapping_value(raw, "price") or _deep_mapping_value(raw, "order", "price") or _deep_mapping_value(raw, "limitPrice") or _deep_mapping_value(raw, "order", "limitPrice")
+    filled_value = order.filled_quantity or _deep_mapping_value(raw, "filled") or _deep_mapping_value(raw, "filledQuantity") or _deep_mapping_value(raw, "filledQty") or _deep_mapping_value(raw, "order", "filled") or _deep_mapping_value(raw, "order", "filledQuantity") or _deep_mapping_value(raw, "order", "filledQty")
+    avg_fill_value = order.average_fill_price or _deep_mapping_value(raw, "averageFillPrice") or _deep_mapping_value(raw, "avgFillPrice") or _deep_mapping_value(raw, "average_price") or _deep_mapping_value(raw, "order", "averageFillPrice") or _deep_mapping_value(raw, "order", "avgFillPrice") or _deep_mapping_value(raw, "order", "average_price")
+    created_at = order.created_at or _deep_mapping_value(raw, "createdAt") or _deep_mapping_value(raw, "submittedAt") or _deep_mapping_value(raw, "placedAt") or _deep_mapping_value(raw, "order", "createdAt") or _deep_mapping_value(raw, "order", "submittedAt") or _deep_mapping_value(raw, "order", "placedAt")
+    updated_at = order.updated_at or _deep_mapping_value(raw, "updatedAt") or _deep_mapping_value(raw, "lastUpdated") or _deep_mapping_value(raw, "lastUpdateAt") or _deep_mapping_value(raw, "order", "updatedAt") or _deep_mapping_value(raw, "order", "lastUpdated") or _deep_mapping_value(raw, "order", "lastUpdateAt")
+
     parts.extend([
-        f"Status: {_safe_html(order.status or 'n/a')}",
-        f"Side: {side_emoji + ' ' if side_emoji else ''}{_safe_html(order.side or 'n/a')}",
-        f"Type: {_safe_html(order.order_type or raw.get('type') or 'n/a')}",
-        f"Outcome: {_safe_html(_first_string(raw.get('outcome'), raw.get('outcomeId'), raw.get('outcome_id'), raw.get('outcomeIndex')) or 'n/a')}",
-        f"Amount: {_code(_format_number(raw.get('amount') or order.quantity))}",
-        f"Price: {_code(_format_number(order.limit_price or raw.get('price')))}",
-        f"Filled: {_code(_format_number(order.filled_quantity or raw.get('filled')))}",
-        f"Avg fill: {_code(_format_number(order.average_fill_price))}",
+        f"Status: {_safe_html(status)}",
+        f"Side: {side_emoji + ' ' if side_emoji else ''}{_safe_html(side)}",
+        f"Type: {_safe_html(order_type)}",
+        f"Outcome: {_safe_html(outcome)}",
+        f"Amount: {_code(_format_number(amount_value))}",
+        f"Price: {_code(_format_number(price_value))}",
+        f"Filled: {_code(_format_number(filled_value))}",
+        f"Avg fill: {_code(_format_number(avg_fill_value))}",
     ])
-    if order.created_at or raw.get('createdAt'):
-        parts.append(f"Created: {_code(order.created_at or raw.get('createdAt'))}")
-    if order.updated_at or raw.get('updatedAt'):
-        parts.append(f"Updated: {_code(order.updated_at or raw.get('updatedAt'))}")
+    if created_at:
+        parts.append(f"Created: {_code(created_at)}")
+    if updated_at:
+        parts.append(f"Updated: {_code(updated_at)}")
     parts.append(GENERAL_QUANT_GUIDANCE.capitalize())
     return "\n".join(parts)
 

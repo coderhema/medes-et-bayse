@@ -13,21 +13,38 @@ def _unwrap_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     return payload
 
 
-def _deep_unwrap_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    current: Mapping[str, Any] = payload
+def _deep_unwrap_payload(payload: Any) -> Mapping[str, Any]:
+    current: Any = payload
     visited: set[int] = set()
-    while isinstance(current, Mapping):
-        next_payload: Optional[Mapping[str, Any]] = None
-        for key in ("data", "result", "quote", "order", "orderData", "order_data"):
+    envelope_keys = ("data", "result", "quote", "order", "payload", "response", "body", "details", "orderData", "order_data", "item", "items")
+    while True:
+        if isinstance(current, list):
+            next_payload = next((item for item in current if isinstance(item, Mapping) and id(item) not in visited), None)
+            if next_payload is None:
+                break
+            visited.add(id(next_payload))
+            current = next_payload
+            continue
+        if not isinstance(current, Mapping):
+            break
+        if id(current) in visited:
+            break
+        visited.add(id(current))
+        next_payload: Optional[Any] = None
+        for key in envelope_keys:
             value = current.get(key)
             if isinstance(value, Mapping) and id(value) not in visited:
                 next_payload = value
                 break
+            if isinstance(value, list):
+                nested = next((item for item in value if isinstance(item, Mapping) and id(item) not in visited), None)
+                if nested is not None:
+                    next_payload = nested
+                    break
         if next_payload is None:
             break
-        visited.add(id(current))
         current = next_payload
-    return current
+    return current if isinstance(current, Mapping) else (payload if isinstance(payload, Mapping) else {})
 
 
 def _coerce_float(value: Any) -> Optional[float]:

@@ -39,12 +39,12 @@ def _env_value(*names: str, required: bool = False, default: str = '') -> str:
 
 def load_runtime_config() -> BayseRuntimeConfig:
     return BayseRuntimeConfig(
-        public_key=_env_value('BAYSE_API_KEY', 'BAYSE_PUBLIC_KEY', required=True),
-        secret_key=_env_value('BAYSE_API_SECRET', 'BAYSE_SECRET_KEY', required=True),
+        public_key=_env_value('BAYSE_PUBLIC_KEY', required=True),
+        secret_key=_env_value('BAYSE_SECRET_KEY', required=True),
         user_id=_env_value('BAYSE_USER_ID', default='5310fdaa-e06e-4501-b1a3-423639a71043'),
         bayse_email=_env_value('BAYSE_EMAIL', default='opedepodesolu@gmail.com'),
-        base_url=_env_value('BAYSE_BASE_URL', default='https://relay.bayse.markets'),
-        poke_api_key=_env_value('POKE_API', 'POKE_API_KEY'),
+        base_url=_env_value('BAYSE_API_URL', default='https://relay.bayse.markets'),
+        poke_api_key=_env_value('POKE_API_KEY'),
     )
 
 

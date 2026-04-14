@@ -151,16 +151,13 @@ def run_spread_capture_cycle(
         logger.warning('[SC] Cannot resolve market/event ID from series market {!r}', series_slug)
         return
 
-    # Subscribe the real-time orderbook feed for this market
     quote_manager.feed.subscribe_market(market_id, event_id=event_id)
 
-    # Derive mid-price: WebSocket snapshot first, REST fallback
     update = quote_manager.latest_for_market(market_id)
     mid_price = _extract_mid_from_update(update)
     if mid_price is None:
         mid_price = engine.get_mid_price(market_id)
 
-    # Fetch inventory
     inventory_units = 0.0
     try:
         portfolio = client.get_portfolio()
@@ -187,11 +184,8 @@ def run_spread_capture_cycle(
     if results:
         logger.info('[SC] {} quote action(s) for {}', len(results), market_id)
 
-    # Burn matched YES/NO pairs to recycle USD capital
     if not dry_run:
         engine.burn_pairs(market_id, quantity=1)
-
-
 
 
 def _execute_quote_plan(client: BayseClient, quote_plan: dict, dry_run: bool, currency: str) -> list[dict]:
@@ -450,20 +444,20 @@ def main():
     if args.scan_only:
         dry_run = True
 
-    bayse_public_key = _env("BAYSE_API_KEY", "BAYSE_PUBLIC_KEY")
-    bayse_secret_key = _env("BAYSE_API_SECRET", "BAYSE_SECRET_KEY")
-    bayse_base_url = _env("BAYSE_BASE_URL", default="https://relay.bayse.markets")
+    bayse_public_key = _env("BAYSE_PUBLIC_KEY")
+    bayse_secret_key = _env("BAYSE_SECRET_KEY")
+    bayse_base_url = _env("BAYSE_API_URL", default="https://relay.bayse.markets")
     bayse_user_id = _env("BAYSE_USER_ID")
 
     if not bayse_public_key:
-        logger.warning("BAYSE_API_KEY/BAYSE_PUBLIC_KEY is not set.")
+        logger.warning("BAYSE_PUBLIC_KEY is not set.")
     if not bayse_secret_key:
-        logger.warning("BAYSE_API_SECRET/BAYSE_SECRET_KEY is not set.")
+        logger.warning("BAYSE_SECRET_KEY is not set.")
     if not bayse_user_id:
         logger.warning("BAYSE_USER_ID is not set.")
 
     client = BayseClient(public_key=bayse_public_key, secret_key=bayse_secret_key, base_url=bayse_base_url)
-    quote_manager = QuoteManager(client, websocket_url=_env("BAYSE_WS_URL", "BAYSE_WEBSOCKET_URL"), poll_interval=float(os.getenv("QUOTE_POLL_INTERVAL_SECONDS", "10")))
+    quote_manager = QuoteManager(client, websocket_url=_env("BAYSE_WS_URL"), poll_interval=float(os.getenv("QUOTE_POLL_INTERVAL_SECONDS", "10")))
 
     telegram_handler = None
     if build_telegram_handler_from_env:
@@ -490,7 +484,6 @@ def main():
 
     strategies = strategy_map[args.strategy]
 
-    # Spread-capture engine (optional; activated with --series or SERIES_SLUG env)
     series_slug = args.series or _env("SERIES_SLUG")
     spread_engine: Optional[SpreadCaptureEngine] = None
     if series_slug:

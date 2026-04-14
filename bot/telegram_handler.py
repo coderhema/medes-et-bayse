@@ -127,6 +127,82 @@ def _brain_parse_trade_intent(text: str, active_context: dict[str, Any]) -> dict
     return {"side": side, "amount": amount, "currency": currency, "outcome_id": active_context.get("outcome_id")}
 
 
+FILLED_ORDER_STATUSES = {"filled", "executed", "complete", "completed", "success", "successfully placed"}
+
+
+def _is_empty_order_result(result: dict) -> bool:
+    """Return True when a place_order API response contains no actionable data.
+
+    Checks the top-level dict as well as an optional ``order`` sub-dict so that
+    both flat and nested API shapes are handled.  Returns True only when *all*
+    critical fields (id, status, side, amount/quantity) are absent, which means
+    the response is a placeholder that should not be shown to the user.
+    """
+    order = result.get("order", result)
+    has_id = bool(
+        result.get("id") or result.get("orderId") or result.get("order_id")
+        or (isinstance(order, dict) and (order.get("id") or order.get("orderId") or order.get("order_id")))
+    )
+    has_status = bool(
+        result.get("status") or result.get("state")
+        or (isinstance(order, dict) and (order.get("status") or order.get("state")))
+    )
+    has_side = bool(
+        result.get("side") or result.get("direction")
+        or (isinstance(order, dict) and (order.get("side") or order.get("direction")))
+    )
+    has_amount = bool(
+        result.get("amount") or result.get("quantity") or result.get("qty")
+        or (isinstance(order, dict) and (order.get("amount") or order.get("quantity") or order.get("qty")))
+    )
+    return not (has_id or has_status or has_side or has_amount)
+
+
+def _format_order_receipt(result: dict) -> str:
+    """Format a confirmed order result as a clean receipt for the user.
+
+    Uses the ``order`` sub-dict when present, falling back to the top-level
+    dict.  Produces a ``✅ Order confirmed`` header so the user can clearly
+    distinguish a filled trade from a generic pending update.
+    """
+    order = result.get("order", result) if isinstance(result, dict) else {}
+    if not isinstance(order, dict):
+        order = result if isinstance(result, dict) else {}
+    engine = result.get("engine", "") if isinstance(result, dict) else ""
+    status = order.get("status") or result.get("status", "filled") if isinstance(result, dict) else "filled"
+    parts = ["✅ <b>Order confirmed</b>"]
+    if engine:
+        parts.append(f"Engine: {engine}")
+    order_id = order.get("id") or order.get("orderId") or order.get("order_id") or result.get("orderId") if isinstance(result, dict) else None
+    if order_id:
+        parts.append(f"Order ID: {order_id}")
+    parts.append(f"Status: {status}")
+    side = order.get("side") or result.get("side", "") if isinstance(result, dict) else ""
+    if side:
+        parts.append(f"Side: {side}")
+    order_type = order.get("type") or order.get("orderType") or result.get("type", "") if isinstance(result, dict) else ""
+    if order_type:
+        parts.append(f"Type: {order_type}")
+    outcome = order.get("outcome") or result.get("outcome", "") if isinstance(result, dict) else ""
+    if outcome:
+        parts.append(f"Outcome: {outcome}")
+    amount = order.get("amount") or result.get("amount")
+    currency = order.get("currency") or result.get("currency", "")
+    if amount is not None:
+        amount_str = f"{float(amount):.2f}"
+        parts.append(f"Amount: {amount_str}{' ' + currency if currency else ''}")
+    price = order.get("price") or result.get("price")
+    if price is not None:
+        parts.append(f"Price: {float(price):.4f}")
+    filled = order.get("filled") or order.get("filledQuantity") or order.get("filledQty")
+    if filled is not None:
+        parts.append(f"Filled: {float(filled):.2f}")
+    avg_price = order.get("averageFillPrice") or order.get("avgFillPrice") or order.get("average_price")
+    if avg_price is not None:
+        parts.append(f"Avg fill: {float(avg_price):.4f}")
+    return "\n".join(parts)
+
+
 class TelegramHandler:
     def __init__(
         self,
@@ -828,7 +904,20 @@ class TelegramHandler:
                 max_slippage,
                 expires_at or None,
             )
-            text = self._format_order(result)
+            # Log raw API response for debugging mapping issues.
+            logger.info("place_order raw response: %s", json.dumps(result, default=str))
+            print(json.dumps({"place_order_raw": result}, default=str), flush=True)
+            if _is_empty_order_result(result):
+                logger.warning("Suppressing order notification: response has no actionable fields. raw=%s", result)
+                return
+            status_lower = str(result.get("status") or result.get("state") or "").lower()
+            order_sub = result.get("order") or {}
+            if isinstance(order_sub, dict):
+                status_lower = status_lower or str(order_sub.get("status") or order_sub.get("state") or "").lower()
+            if status_lower in FILLED_ORDER_STATUSES:
+                text = _format_order_receipt(result)
+            else:
+                text = self._format_order(result)
             self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_id, currency=currency, side=side)
             view_key = _detail_key("order", f"{event_id}:{market_id}:{outcome}:{amount}:{currency}:{order_type}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
@@ -877,7 +966,20 @@ class TelegramHandler:
                     "MARKET",
                     None, None, None, None, None,
                 )
-                reply_text = self._format_order(result)
+                # Log raw API response for debugging mapping issues.
+                logger.info("place_order raw response: %s", json.dumps(result, default=str))
+                print(json.dumps({"place_order_raw": result}, default=str), flush=True)
+                if _is_empty_order_result(result):
+                    logger.warning("Suppressing order notification: response has no actionable fields. raw=%s", result)
+                    return
+                status_lower = str(result.get("status") or result.get("state") or "").lower()
+                order_sub = result.get("order") or {}
+                if isinstance(order_sub, dict):
+                    status_lower = status_lower or str(order_sub.get("status") or order_sub.get("state") or "").lower()
+                if status_lower in FILLED_ORDER_STATUSES:
+                    reply_text = _format_order_receipt(result)
+                else:
+                    reply_text = self._format_order(result)
                 view_key = _detail_key(
                     "buy",
                     f"{active['event_id']}:{active['market_id']}:{_outcome_label(side)}:{amount}:{active['currency']}",
@@ -928,7 +1030,20 @@ class TelegramHandler:
                 None,
                 None,
             )
-            text = self._format_order(result)
+            # Log raw API response for debugging mapping issues.
+            logger.info("place_order raw response: %s", json.dumps(result, default=str))
+            print(json.dumps({"place_order_raw": result}, default=str), flush=True)
+            if _is_empty_order_result(result):
+                logger.warning("Suppressing order notification: response has no actionable fields. raw=%s", result)
+                return
+            status_lower = str(result.get("status") or result.get("state") or "").lower()
+            order_sub = result.get("order") or {}
+            if isinstance(order_sub, dict):
+                status_lower = status_lower or str(order_sub.get("status") or order_sub.get("state") or "").lower()
+            if status_lower in FILLED_ORDER_STATUSES:
+                text = _format_order_receipt(result)
+            else:
+                text = self._format_order(result)
             self._store_active_context(context, event_id=active["event_id"], market_id=active["market_id"], outcome_id=outcome, currency=currency, side=side)
             view_key = _detail_key("smart-trade", f"{active['event_id']}:{active['market_id']}:{outcome_id}:{amount}:{currency}:{side}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)

@@ -23,12 +23,22 @@ except Exception:  # pragma: no cover
 DEBUG_SPAM_PHRASES = {"no signals this cycle"}
 WATCHLIST_PAGE_SIZE = 10
 GENERAL_QUANT_GUIDANCE = "quant best practice: prefer limit orders, size positions deliberately, and define an exit before entry."
+FILLED_ORDER_STATUSES = {"filled", "executed", "complete", "completed", "success", "successfully placed"}
 logger = logging.getLogger(__name__)
 
 
 def _should_suppress_debug_message(text: Any) -> bool:
     normalized = _normalize_text(text).lower()
     return any(phrase in normalized for phrase in DEBUG_SPAM_PHRASES)
+
+
+def _is_suppressed_order_result(result: "CommandResult") -> bool:
+    """Return True when build_order_command suppressed a notification due to an empty response."""
+    return (
+        not result.ok
+        and isinstance(result.raw, dict)
+        and result.raw.get("suppressed") is True
+    )
 
 
 @dataclass(frozen=True)
@@ -339,6 +349,182 @@ def _order_text(response: OrderResponse) -> str:
         parts.append(f"Created: {_code(created_at)}")
     if updated_at:
         parts.append(f"Updated: {_code(updated_at)}")
+    parts.append(GENERAL_QUANT_GUIDANCE.capitalize())
+    return "\n".join(parts)
+
+
+def _is_empty_order_response(response: "OrderResponse") -> bool:
+    """Return True when the order response contains no actionable data.
+
+    An empty response is one where every critical identifying field resolves to
+    None – typically a skeleton/placeholder payload returned by the API before
+    the order has been processed.  In that case the bot should stay silent
+    rather than surfacing an all-n/a "Order update" message to the user.
+    """
+    order = response.order
+    raw = response.raw or {}
+    has_id = bool(order.order_id)
+    has_status = bool(
+        order.status
+        or _deep_mapping_value(raw, "status")
+        or _deep_mapping_value(raw, "state")
+        or _deep_mapping_value(raw, "order", "status")
+        or _deep_mapping_value(raw, "order", "state")
+    )
+    has_side = bool(
+        order.side
+        or _deep_mapping_value(raw, "side")
+        or _deep_mapping_value(raw, "direction")
+        or _deep_mapping_value(raw, "order", "side")
+    )
+    has_amount = bool(
+        order.amount
+        or order.quantity
+        or _deep_mapping_value(raw, "amount")
+        or _deep_mapping_value(raw, "quantity")
+        or _deep_mapping_value(raw, "order", "amount")
+        or _deep_mapping_value(raw, "order", "quantity")
+    )
+    return not (has_id or has_status or has_side or has_amount)
+
+
+def _format_filled_receipt(response: "OrderResponse") -> str:
+    """Return a confirmed-order receipt formatted for display to the user.
+
+    This is identical to :func:`_order_text` but uses a "✅ Order confirmed"
+    header so the user can clearly distinguish a successful fill from a generic
+    in-progress status update.
+    """
+    order = response.order
+    raw = response.raw or {}
+    side_emoji = _signal_emoji(order.side) or _side_emoji(order.side)
+    parts = ["✅ <b>Order confirmed</b>"]
+
+    event_title = _first_string(
+        _deep_mapping_value(raw, "event", "metadata", "name"),
+        _deep_mapping_value(raw, "event", "metadata", "title"),
+        _deep_mapping_value(raw, "event", "name"),
+        _deep_mapping_value(raw, "event", "title"),
+        _deep_mapping_value(raw, "metadata", "name"),
+        _deep_mapping_value(raw, "metadata", "title"),
+        raw.get("eventTitle"),
+    )
+    market_title = _first_string(
+        _deep_mapping_value(raw, "market", "metadata", "name"),
+        _deep_mapping_value(raw, "market", "metadata", "title"),
+        _deep_mapping_value(raw, "market", "name"),
+        _deep_mapping_value(raw, "market", "title"),
+        _deep_mapping_value(raw, "market", "marketTitle"),
+        raw.get("marketTitle"),
+        raw.get("marketName"),
+    )
+    if event_title:
+        parts.append(f"Event: {_bold(event_title)}")
+    if market_title:
+        parts.append(f"Market: {_bold(market_title)}")
+
+    status = _first_string(
+        order.status,
+        _deep_mapping_value(raw, "status"),
+        _deep_mapping_value(raw, "state"),
+        _deep_mapping_value(raw, "order", "status"),
+        _deep_mapping_value(raw, "order", "state"),
+        default="filled",
+    )
+    side = _first_string(
+        order.side,
+        _deep_mapping_value(raw, "side"),
+        _deep_mapping_value(raw, "direction"),
+        _deep_mapping_value(raw, "order", "side"),
+        _deep_mapping_value(raw, "order", "direction"),
+        default="n/a",
+    )
+    order_type = _first_string(
+        order.order_type,
+        _deep_mapping_value(raw, "type"),
+        _deep_mapping_value(raw, "orderType"),
+        _deep_mapping_value(raw, "order", "type"),
+        _deep_mapping_value(raw, "order", "orderType"),
+        default="n/a",
+    )
+    outcome = _first_string(
+        _deep_mapping_value(raw, "outcome"),
+        _deep_mapping_value(raw, "outcomeId"),
+        _deep_mapping_value(raw, "outcome_id"),
+        _deep_mapping_value(raw, "outcomeIndex"),
+        _deep_mapping_value(raw, "order", "outcome"),
+        _deep_mapping_value(raw, "order", "outcomeId"),
+        _deep_mapping_value(raw, "order", "outcome_id"),
+        default="n/a",
+    )
+    amount_value = (
+        order.amount
+        or _deep_mapping_value(raw, "amount")
+        or _deep_mapping_value(raw, "order", "amount")
+        or order.quantity
+        or _deep_mapping_value(raw, "quantity")
+        or _deep_mapping_value(raw, "order", "quantity")
+    )
+    price_value = (
+        order.limit_price
+        or _deep_mapping_value(raw, "price")
+        or _deep_mapping_value(raw, "order", "price")
+        or _deep_mapping_value(raw, "limitPrice")
+        or _deep_mapping_value(raw, "order", "limitPrice")
+    )
+    filled_value = (
+        order.filled_quantity
+        or _deep_mapping_value(raw, "filled")
+        or _deep_mapping_value(raw, "filledQuantity")
+        or _deep_mapping_value(raw, "filledQty")
+        or _deep_mapping_value(raw, "order", "filled")
+        or _deep_mapping_value(raw, "order", "filledQuantity")
+        or _deep_mapping_value(raw, "order", "filledQty")
+    )
+    avg_fill_value = (
+        order.average_fill_price
+        or _deep_mapping_value(raw, "averageFillPrice")
+        or _deep_mapping_value(raw, "avgFillPrice")
+        or _deep_mapping_value(raw, "average_price")
+        or _deep_mapping_value(raw, "order", "averageFillPrice")
+        or _deep_mapping_value(raw, "order", "avgFillPrice")
+        or _deep_mapping_value(raw, "order", "average_price")
+    )
+    created_at = (
+        order.created_at
+        or _deep_mapping_value(raw, "createdAt")
+        or _deep_mapping_value(raw, "submittedAt")
+        or _deep_mapping_value(raw, "placedAt")
+        or _deep_mapping_value(raw, "order", "createdAt")
+        or _deep_mapping_value(raw, "order", "submittedAt")
+        or _deep_mapping_value(raw, "order", "placedAt")
+    )
+    updated_at = (
+        order.updated_at
+        or _deep_mapping_value(raw, "updatedAt")
+        or _deep_mapping_value(raw, "lastUpdated")
+        or _deep_mapping_value(raw, "lastUpdateAt")
+        or _deep_mapping_value(raw, "order", "updatedAt")
+        or _deep_mapping_value(raw, "order", "lastUpdated")
+        or _deep_mapping_value(raw, "order", "lastUpdateAt")
+    )
+
+    parts.extend([
+        f"Status: {_safe_html(status)}",
+        f"Side: {side_emoji + ' ' if side_emoji else ''}{_safe_html(side)}",
+        f"Type: {_safe_html(order_type)}",
+        f"Outcome: {_safe_html(outcome)}",
+        f"Amount: {_code(_format_number(amount_value))}",
+        f"Price: {_code(_format_number(price_value))}",
+        f"Filled: {_code(_format_number(filled_value))}",
+        f"Avg fill: {_code(_format_number(avg_fill_value))}",
+    ])
+    if created_at:
+        parts.append(f"Created: {_code(created_at)}")
+    if updated_at:
+        parts.append(f"Updated: {_code(updated_at)}")
+    if order.order_id:
+        parts.append(f"Order ID: {_code(order.order_id)}")
     parts.append(GENERAL_QUANT_GUIDANCE.capitalize())
     return "\n".join(parts)
 
@@ -1622,7 +1808,16 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
             order_type=order_type,
             price=price,
         )
+        # Log the raw API response so the JSON structure can be inspected.
+        logger.info("place_order raw response: %s", json.dumps(response_payload, default=str))
+        print(json.dumps({"place_order_raw": response_payload}, default=str), flush=True)
         response = OrderResponse.from_dict(response_payload)
+        if _is_empty_order_response(response):
+            logger.warning("Suppressing order notification: response has no actionable fields. raw=%s", response_payload)
+            return CommandResult(False, "", raw={"suppressed": True, "reason": "empty_order_response", "raw": response_payload})
+        status_lower = _normalize_text(response.order.status).lower()
+        if status_lower in FILLED_ORDER_STATUSES:
+            return CommandResult(True, _format_filled_receipt(response), raw=response.raw or response_payload)
         return CommandResult(True, _order_text(response), raw=response.raw or response_payload)
     except BayseClientError as exc:
         return CommandResult(False, _error_text(exc))
@@ -2149,6 +2344,11 @@ def is_debug_spam_message(text: Any) -> bool:
     return _should_suppress_debug_message(text)
 
 
+def is_empty_order_response(response: "OrderResponse") -> bool:
+    """Public wrapper around :func:`_is_empty_order_response` for external callers."""
+    return _is_empty_order_response(response)
+
+
 def sticker_config_from_env() -> StickerSetConfig:
     import os
     return StickerSetConfig(
@@ -2203,6 +2403,8 @@ def natural_language_handler_factory(client: BayseClient) -> Callable[[Any, Any]
         else:
             result = build_natural_language_command(client, text, context=context)
         if not result.ok:
+            if _is_suppressed_order_result(result):
+                return
             print(json.dumps({"telegram": "text_error", "text": text, "response": result.text}, ensure_ascii=False), flush=True)
             if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency":
                 candidate = _trade_context_candidate(context) or {}
@@ -2312,7 +2514,8 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
         smart_result = build_smart_trade_command(client, text, context=context)
         if smart_result is not None:
             if not smart_result.ok:
-                await message.reply_text(smart_result.text, parse_mode="HTML")
+                if not _is_suppressed_order_result(smart_result):
+                    await message.reply_text(smart_result.text, parse_mode="HTML")
                 return
             await message.reply_text(smart_result.text, parse_mode="HTML")
             scenario = _order_scenario_from_result(smart_result)
@@ -2321,7 +2524,7 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             return
         if active_candidate:
             result = build_order_command(client, text, context=context)
-            if _should_suppress_debug_message(result.text):
+            if _should_suppress_debug_message(result.text) or _is_suppressed_order_result(result):
                 return
             if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency":
                 await message.reply_text(_trade_currency_prompt_text(active_candidate), reply_markup=_trade_currency_keyboard(), parse_mode="HTML")
@@ -2337,7 +2540,7 @@ def order_handler_factory(client: BayseClient) -> Callable[[Any, Any], Any]:
             await message.reply_text("What order do you want to place? Send outcome, buy|sell, amount, and currency.", parse_mode="HTML")
             return
         result = build_order_command(client, text, context=context)
-        if _should_suppress_debug_message(result.text):
+        if _should_suppress_debug_message(result.text) or _is_suppressed_order_result(result):
             return
         if isinstance(result.raw, dict) and result.raw.get("next_step") == "currency" and active_candidate:
             await message.reply_text(_trade_currency_prompt_text(active_candidate), reply_markup=_trade_currency_keyboard(), parse_mode="HTML")

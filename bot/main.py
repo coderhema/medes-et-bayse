@@ -360,6 +360,9 @@ def run_cycle(
                 order_type="LIMIT" if price else "MARKET",
                 time_in_force="GTC" if price else None,
             )
+            # Log raw API response so the JSON structure can be inspected.
+            logger.info("place_order raw response: %s", json.dumps(result, default=str))
+            print(json.dumps({"place_order_raw": result}, default=str), flush=True)
             signal["trade_result"] = result
             executed.append(signal)
         else:

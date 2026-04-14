@@ -1540,10 +1540,11 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         response_payload = client.place_order(
             event_id,
             market_id,
-            outcome=outcome_text.upper(),
+            outcome_id=outcome_id,
             side=side,
             amount=amount,
             currency=currency,
+            order_type=order_type,
             price=price,
         )
         response = OrderResponse.from_dict(response_payload)
@@ -1582,9 +1583,23 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     selected_trade = _active_trade_selection(context)
     if not isinstance(selected_trade, dict) and isinstance(order_state, dict):
         selected_trade = order_state
-    currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or _smart_trade_currency(active_candidate)).upper()
-    if not currency:
-        currency = _smart_trade_currency(active_candidate)
+
+    # Use explicit currency from text; fall back to saved state; otherwise prompt
+    has_explicit_currency = bool(SMART_TRADE_CURRENCY_PATTERN.search(text))
+    state_currency = _normalize_text((order_state or {}).get("currency")).upper() if isinstance(order_state, dict) else ""
+    if has_explicit_currency:
+        currency = _normalize_text(parsed.get("currency")).upper()
+    elif state_currency in {"NGN", "USD"}:
+        currency = state_currency
+    else:
+        outcome = _normalize_text(parsed.get("outcome") or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "") or ("YES" if side == "buy" else "NO")).upper()
+        if outcome in {"LONG", "SHORT"}:
+            outcome = "YES" if outcome == "LONG" else "NO"
+        if not outcome:
+            outcome = "YES" if side == "buy" else "NO"
+        _set_trade_order_state(context, active_candidate, side=side, amount=amount, outcome_label=outcome, stage="currency")
+        _set_pending_interaction(context, "trade_currency", prompt="Choose a currency to continue.")
+        return CommandResult(False, _trade_currency_prompt_text(active_candidate), raw={"next_step": "currency"})
 
     outcome = _normalize_text(parsed.get("outcome") or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "") or ("YES" if side == "buy" else "NO")).upper()
     if outcome in {"LONG", "SHORT"}:

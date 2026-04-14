@@ -1584,7 +1584,13 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     if not isinstance(selected_trade, dict) and isinstance(order_state, dict):
         selected_trade = order_state
 
-    # Use explicit currency from text; fall back to saved state; otherwise prompt
+    # Resolve outcome label once so it can be used whether we prompt for currency or proceed
+    raw_outcome = _normalize_text(parsed.get("outcome") or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "") or ("YES" if side == "buy" else "NO")).upper()
+    if raw_outcome in {"LONG", "SHORT"}:
+        raw_outcome = "YES" if raw_outcome == "LONG" else "NO"
+    outcome = raw_outcome or ("YES" if side == "buy" else "NO")
+
+    # Use explicit currency from text (NGN/USD); fall back to saved state; otherwise prompt
     has_explicit_currency = bool(SMART_TRADE_CURRENCY_PATTERN.search(text))
     state_currency = _normalize_text((order_state or {}).get("currency")).upper() if isinstance(order_state, dict) else ""
     if has_explicit_currency:
@@ -1592,20 +1598,9 @@ def build_smart_trade_command(client: BayseClient, text: str, context: Any = Non
     elif state_currency in {"NGN", "USD"}:
         currency = state_currency
     else:
-        outcome = _normalize_text(parsed.get("outcome") or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "") or ("YES" if side == "buy" else "NO")).upper()
-        if outcome in {"LONG", "SHORT"}:
-            outcome = "YES" if outcome == "LONG" else "NO"
-        if not outcome:
-            outcome = "YES" if side == "buy" else "NO"
         _set_trade_order_state(context, active_candidate, side=side, amount=amount, outcome_label=outcome, stage="currency")
         _set_pending_interaction(context, "trade_currency", prompt="Choose a currency to continue.")
         return CommandResult(False, _trade_currency_prompt_text(active_candidate), raw={"next_step": "currency"})
-
-    outcome = _normalize_text(parsed.get("outcome") or (selected_trade.get("outcome_label") if isinstance(selected_trade, dict) else "") or ("YES" if side == "buy" else "NO")).upper()
-    if outcome in {"LONG", "SHORT"}:
-        outcome = "YES" if outcome == "LONG" else "NO"
-    if not outcome:
-        outcome = "YES" if side == "buy" else "NO"
 
     _set_trade_order_state(context, active_candidate, side=side, currency=currency, amount=amount, outcome_label=outcome, stage="ready")
     synthetic_text = f"{amount:g} {currency}"

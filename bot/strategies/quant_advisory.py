@@ -23,6 +23,10 @@ class QuantAdvisory:
         the verdict recommends a directional trade.  Defaults to 0.03 (3 ¢).
     """
 
+    # Spread at or above this value (10 ¢) is treated as fully uncertain
+    # (confidence = 0).  Narrower spreads scale linearly up to confidence 1.
+    MAX_UNCERTAIN_SPREAD: float = 0.10
+
     def __init__(self, min_edge: float = 0.03) -> None:
         self.min_edge = min_edge
 
@@ -67,9 +71,8 @@ class QuantAdvisory:
         risk_reward = abs(edge) / half_spread if half_spread > 0 else 0.0
 
         # Confidence: narrow spread → liquid market → higher confidence.
-        # A spread of 0.10 (10 ¢) or wider is treated as zero confidence.
-        max_uncertain_spread = 0.10
-        confidence = max(0.0, min(1.0, 1.0 - spread / max_uncertain_spread))
+        # A spread >= MAX_UNCERTAIN_SPREAD (10 ¢) is treated as zero confidence.
+        confidence = max(0.0, min(1.0, 1.0 - spread / self.MAX_UNCERTAIN_SPREAD))
 
         confidence_label = self._confidence_label(confidence)
 

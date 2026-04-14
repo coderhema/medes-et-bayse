@@ -32,7 +32,7 @@ except ImportError as exc:
 
 try:
     from bot.strategies.quant_advisory import QuantAdvisory, format_quant_opinion
-except ImportError:  # pragma: no cover – optional strategy layer
+except ImportError:  # pragma: no cover - optional strategy layer
     QuantAdvisory = None  # type: ignore[assignment,misc]
     format_quant_opinion = None  # type: ignore[assignment]
 
@@ -493,7 +493,7 @@ class TelegramHandler:
             opinion = self._quant_advisory.generate_opinion(event)
             return format_quant_opinion(opinion, title=title)
         except Exception as exc:
-            logger.debug(f"Quant opinion unavailable: {exc}")
+            logger.warning(f"Quant opinion unavailable: {exc}")
             return None
 
     @staticmethod

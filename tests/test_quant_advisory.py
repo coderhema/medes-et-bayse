@@ -106,7 +106,9 @@ class TestGenerateOpinion:
         assert opinion["verdict_signal"] in {"BUY YES", "BUY NO", "HOLD"}
 
     def test_hold_when_edge_below_min_edge(self):
-        advisory = QuantAdvisory(min_edge=0.99)  # almost impossible to beat
+        # min_edge=1.0 means any edge less than 100% triggers HOLD (always true
+        # since fair_value is clamped to [0.01, 0.99])
+        advisory = QuantAdvisory(min_edge=1.0)
         opinion = advisory.generate_opinion(EVENT_WITH_PRICES)
         assert opinion["verdict_signal"] == "HOLD"
 
@@ -121,9 +123,9 @@ class TestGenerateOpinion:
         advisory = QuantAdvisory()
         opinion = advisory.generate_opinion(EVENT_NARROW_SPREAD)
         assert opinion["available"] is True
-        # Even with a very tight bid/ask, the floor spread (min_edge-based) keeps
-        # confidence around 0.70; verify it is higher than a wide-spread scenario.
-        assert opinion["confidence"] > 0.60
+        # The half-spread floor (min_edge/2 = 0.015) means spread ~= 0.030,
+        # giving confidence = 1 - 0.030/0.10 = 0.70.  Assert it is above 0.65.
+        assert opinion["confidence"] > 0.65
 
     def test_volume_captured(self):
         advisory = QuantAdvisory()

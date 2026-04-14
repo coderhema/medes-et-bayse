@@ -340,8 +340,7 @@ def _order_text(response: OrderResponse) -> str:
     if updated_at:
         parts.append(f"Updated: {_code(updated_at)}")
     parts.append(GENERAL_QUANT_GUIDANCE.capitalize())
-    return "
-".join(parts)
+    return "\n".join(parts)
 
 
 def _error_text(exc: BayseClientError) -> str:

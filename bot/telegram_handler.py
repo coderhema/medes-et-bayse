@@ -1,7 +1,7 @@
 """Telegram bot handler for medes-et-bayse.
 
 Provides outbound notifications and inbound commands:
-  /start, /help, /status, /balance, /portfolio, /events, /quote, /order
+  /start, /help, /status, /balance, /portfolio, /events, /quote, /order, /quant
 """
 
 from __future__ import annotations
@@ -29,6 +29,12 @@ try:
     )
 except ImportError as exc:
     raise ImportError("python-telegram-bot is required. Install it with: pip install python-telegram-bot") from exc
+
+try:
+    from bot.strategies.quant_advisory import QuantAdvisory, format_quant_opinion
+except ImportError:  # pragma: no cover – optional strategy layer
+    QuantAdvisory = None  # type: ignore[assignment,misc]
+    format_quant_opinion = None  # type: ignore[assignment]
 
 DEFAULT_CHAT_ID = "6433282551"
 DEFAULT_SUCCESS_STICKER_SET = "MedesEtBayse"
@@ -145,9 +151,14 @@ class TelegramHandler:
         self.success_sticker_file_id = success_sticker_file_id.strip() if success_sticker_file_id else None
         self._sticker_cache: dict[str, str] = {}
         self._app: Optional[Application] = None
+        self._quant_advisory: Optional["QuantAdvisory"] = None
 
     def attach_bayse_client(self, bayse_client) -> None:
         self.bayse_client = bayse_client
+
+    def attach_quant_advisory(self, advisory: "QuantAdvisory") -> None:
+        """Attach a :class:`QuantAdvisory` instance used to generate pre-trade opinions."""
+        self._quant_advisory = advisory
 
     async def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
         try:
@@ -474,6 +485,16 @@ class TelegramHandler:
             lines.append("\n" + " | ".join(summary))
         return "\n".join(lines)
 
+    def _quant_opinion_text(self, event: dict, title: str = "") -> Optional[str]:
+        """Return a formatted quant opinion string or ``None`` if unavailable."""
+        if self._quant_advisory is None or format_quant_opinion is None:
+            return None
+        try:
+            opinion = self._quant_advisory.generate_opinion(event)
+            return format_quant_opinion(opinion, title=title)
+        except Exception as exc:
+            logger.debug(f"Quant opinion unavailable: {exc}")
+            return None
 
     @staticmethod
     def _market_query_terms(text: str) -> list[str]:
@@ -709,10 +730,13 @@ class TelegramHandler:
             "/portfolio — open positions\n"
             "/events — active markets\n"
             "/markets — search open markets by keyword\n"
+            "/quant — quant advisory opinion for the active market\n"
             "/quote — price quote before an order\n"
             "/order — place a Bayse order\n"
             "You can also say things like 'show me events' or 'is there any bitcoin market'.\n\n"
             "Examples:\n"
+            "/quant — opinion for the currently selected market\n"
+            "/quant &lt;event_id&gt; — opinion for a specific event\n"
             "/quote event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 currency=USD\n"
             "/order event_id=&lt;uuid&gt; market_id=&lt;uuid&gt; side=BUY outcome_id=&lt;uuid&gt; amount=100 type=MARKET currency=USD",
             parse_mode="HTML",
@@ -757,6 +781,51 @@ class TelegramHandler:
     async def _cmd_markets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = " ".join(context.args).strip() if context.args else ""
         await self._show_market_catalog(update, context, query=query)
+
+    async def _cmd_quant(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show a quant advisory opinion for the currently active market context."""
+        if self._quant_advisory is None:
+            await update.message.reply_text(
+                "Quant advisory is not enabled on this bot instance.", parse_mode="HTML"
+            )
+            return
+
+        active = self._normalize_trade_context(context)
+        event_cache = self._get_event_cache(context)
+        event_id = _normalize_text(active.get("event_id"))
+        event: Optional[dict] = event_cache.get(event_id) if event_id else None
+
+        if event is None and context.args:
+            # Allow /quant <event_id> to query a specific event.
+            lookup_id = context.args[0].strip()
+            event = event_cache.get(lookup_id)
+            if event is None:
+                client = self._require_client()
+                try:
+                    event = await asyncio.to_thread(client.get_event, lookup_id)
+                    event_cache[lookup_id] = event
+                except Exception as e:
+                    await update.message.reply_text(
+                        f"Could not fetch event {lookup_id}: {e}", parse_mode="HTML"
+                    )
+                    return
+
+        if event is None:
+            await update.message.reply_text(
+                "No active market context. Browse markets with /events and select one first, "
+                "or pass an event ID: <code>/quant &lt;event_id&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        title = _normalize_text(event.get("title") or event.get("name") or event_id)
+        opinion_text = self._quant_opinion_text(event, title=title)
+        if opinion_text is None:
+            await update.message.reply_text(
+                "Not enough price data to compute a quant opinion for this market.", parse_mode="HTML"
+            )
+            return
+        await update.message.reply_text(opinion_text, parse_mode="HTML")
 
     async def _cmd_quote(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         client = self._require_client()
@@ -1015,8 +1084,17 @@ class TelegramHandler:
             if outcome_id:
                 keyboard_rows.append([InlineKeyboardButton(outcome_title, callback_data=f"outcome:{active.get('event_id', resolved_event_id)}:{market_id}:{outcome_id}")])
         keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+
+        # Prepend a brief quant opinion when the advisory is available.
+        event_for_opinion = event_cache.get(resolved_event_id) or {}
+        opinion_text = self._quant_opinion_text(event_for_opinion, title=market_title)
+        if opinion_text:
+            msg_text = f"{opinion_text}\n\n<b>{market_title}</b>\nSelect an outcome:"
+        else:
+            msg_text = f"<b>{market_title}</b>\nSelect an outcome:"
+
         await query.edit_message_text(
-            f"<b>{market_title}</b>\nSelect an outcome:",
+            msg_text,
             reply_markup=keyboard,
             parse_mode="HTML",
         )
@@ -1051,8 +1129,17 @@ class TelegramHandler:
             InlineKeyboardButton("NGN", callback_data=f"currency:{resolved_event_id}:{resolved_market_id}:{resolved_outcome_id}:NGN"),
             InlineKeyboardButton("USD", callback_data=f"currency:{resolved_event_id}:{resolved_market_id}:{resolved_outcome_id}:USD"),
         ]])
+
+        # Include quant opinion (if advisory is attached and data is available).
+        event_for_opinion = self._get_event_cache(context).get(resolved_event_id) or {}
+        opinion_text = self._quant_opinion_text(event_for_opinion)
+        if opinion_text:
+            msg_text = f"{opinion_text}\n\nOutcome: <b>{label}</b>\nSelect currency:"
+        else:
+            msg_text = f"Outcome: <b>{label}</b>\nSelect currency:"
+
         await query.edit_message_text(
-            f"Outcome: <b>{label}</b>\nSelect currency:",
+            msg_text,
             reply_markup=keyboard,
             parse_mode="HTML",
         )
@@ -1141,6 +1228,7 @@ class TelegramHandler:
         app.add_handler(CommandHandler("portfolio", self._cmd_portfolio))
         app.add_handler(CommandHandler("events", self._cmd_events))
         app.add_handler(CommandHandler("markets", self._cmd_markets))
+        app.add_handler(CommandHandler("quant", self._cmd_quant))
         app.add_handler(CommandHandler("quote", self._cmd_quote))
         app.add_handler(CommandHandler("order", self._cmd_order))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._cmd_text))

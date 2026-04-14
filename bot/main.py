@@ -18,6 +18,7 @@ from bot.realtime_feed import QuoteManager
 from bot.strategies.arbitrage import ArbitrageStrategy
 from bot.strategies.kelly import KellyStrategy
 from bot.strategies.market_maker import MarketMakerStrategy, extract_inventory_units
+from bot.strategies.quant_advisory import QuantAdvisory
 from bot.strategies.spread_capture import SpreadCaptureEngine
 
 try:
@@ -468,6 +469,10 @@ def main():
     min_edge = float(os.getenv("MIN_EDGE", "0.03"))
     max_position_fraction = float(os.getenv("MAX_POSITION_FRACTION", "0.05"))
     quote_currency = _env("BAYSE_CURRENCY", default="USD")
+
+    quant_advisory = QuantAdvisory(min_edge=min_edge)
+    if telegram_handler:
+        telegram_handler.attach_quant_advisory(quant_advisory)
 
     strategy_map = {
         "kelly": [KellyStrategy(bankroll=bankroll, min_edge=min_edge, max_fraction=max_position_fraction)],

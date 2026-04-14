@@ -346,3 +346,23 @@ def extract_inventory_units(
     """
     mm = MarketMakerStrategy(bankroll=1.0)
     return mm._inventory_units(portfolio, event_id=event_id, market_id=market_id, outcome_id=outcome_id)
+
+
+def compute_fair_value(event: dict, live_quote: dict[str, Any]) -> Optional[float]:
+    """Compute a blended fair value for a market event.
+
+    Module-level wrapper around :meth:`MarketMakerStrategy._compute_fair_value`
+    that can be used by other modules (e.g. quant advisory) without requiring a
+    full strategy instance.
+    """
+    mm = MarketMakerStrategy(bankroll=1.0)
+    return mm._compute_fair_value(event, live_quote)
+
+
+def compute_half_spread(fair_value: float, live_quote: dict[str, Any]) -> float:
+    """Compute the half-spread implied by a live quote.
+
+    Module-level wrapper around :meth:`MarketMakerStrategy._quote_half_spread`.
+    """
+    mm = MarketMakerStrategy(bankroll=1.0)
+    return mm._quote_half_spread(fair_value, live_quote)

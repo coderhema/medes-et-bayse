@@ -274,3 +274,131 @@ def test_candidate_from_state_rebuilds_all_id_aliases():
     assert candidate["market_id"] == "mkt_state"
     assert candidate["marketId"] == "mkt_state"
     assert candidate["marketid"] == "mkt_state"
+
+
+# ── Empty/placeholder order response suppression ───────────────────────────────
+
+def test_is_empty_order_response_returns_true_for_empty_payload():
+    """_is_empty_order_response must return True when all critical fields are absent."""
+    from medes_et_bayse.models import OrderResponse
+    response = OrderResponse.from_dict({})
+    assert handlers._is_empty_order_response(response) is True
+
+
+def test_is_empty_order_response_returns_false_when_order_id_present():
+    """_is_empty_order_response must return False when the order has an ID."""
+    from medes_et_bayse.models import OrderResponse
+    response = OrderResponse.from_dict({"orderId": "ord_abc"})
+    assert handlers._is_empty_order_response(response) is False
+
+
+def test_is_empty_order_response_returns_false_when_status_present():
+    """_is_empty_order_response must return False when the order has a status."""
+    from medes_et_bayse.models import OrderResponse
+    response = OrderResponse.from_dict({"status": "open"})
+    assert handlers._is_empty_order_response(response) is False
+
+
+def test_is_empty_order_response_returns_false_for_filled_order():
+    """_is_empty_order_response must return False for a fully filled order."""
+    from medes_et_bayse.models import OrderResponse
+    response = OrderResponse.from_dict({
+        "orderId": "ord_filled",
+        "status": "FILLED",
+        "side": "BUY",
+        "amount": 100.0,
+    })
+    assert handlers._is_empty_order_response(response) is False
+
+
+def test_build_order_command_suppresses_empty_response():
+    """build_order_command must suppress an all-empty API response and not return ok=True."""
+
+    class EmptyResponseClient:
+        calls = []
+
+        def place_order(self, event_id, market_id, *, outcome_id, side, amount, currency, order_type="MARKET", price=None):
+            self.calls.append({})
+            return {}  # completely empty response
+
+    client = EmptyResponseClient()
+    context = make_context()
+
+    result = handlers.build_order_command(client, "250", context=context)
+
+    assert result is not None
+    assert result.ok is False
+    assert isinstance(result.raw, dict)
+    assert result.raw.get("suppressed") is True
+
+
+def test_build_order_command_returns_ok_for_response_with_order_id():
+    """build_order_command must return ok=True when the API response contains an order ID."""
+
+    class FullResponseClient:
+        def place_order(self, event_id, market_id, *, outcome_id, side, amount, currency, order_type="MARKET", price=None):
+            return {
+                "orderId": "ord_xyz",
+                "status": "submitted",
+                "side": side,
+                "amount": amount,
+            }
+
+    client = FullResponseClient()
+    context = make_context()
+
+    result = handlers.build_order_command(client, "250", context=context)
+
+    assert result is not None
+    assert result.ok is True
+    assert "Order" in result.text
+
+
+def test_build_order_command_uses_filled_receipt_for_filled_status():
+    """build_order_command must use the confirmed receipt header when status is FILLED."""
+
+    class FilledResponseClient:
+        def place_order(self, event_id, market_id, *, outcome_id, side, amount, currency, order_type="MARKET", price=None):
+            return {
+                "orderId": "ord_filled",
+                "status": "filled",
+                "side": side,
+                "amount": amount,
+            }
+
+    client = FilledResponseClient()
+    context = make_context()
+
+    result = handlers.build_order_command(client, "500", context=context)
+
+    assert result is not None
+    assert result.ok is True
+    assert "confirmed" in result.text.lower()
+
+
+def test_is_suppressed_order_result_identifies_suppressed_result():
+    """_is_suppressed_order_result must return True only for suppressed results."""
+    suppressed = handlers.CommandResult(False, "", raw={"suppressed": True, "reason": "empty_order_response", "raw": {}})
+    normal_error = handlers.CommandResult(False, "Some error message")
+    ok_result = handlers.CommandResult(True, "Order update")
+
+    assert handlers._is_suppressed_order_result(suppressed) is True
+    assert handlers._is_suppressed_order_result(normal_error) is False
+    assert handlers._is_suppressed_order_result(ok_result) is False
+
+
+def test_format_filled_receipt_produces_confirmed_header():
+    """_format_filled_receipt must produce a confirmed header and include key fields."""
+    from medes_et_bayse.models import OrderResponse
+    response = OrderResponse.from_dict({
+        "orderId": "ord_conf",
+        "status": "FILLED",
+        "side": "BUY",
+        "amount": 200.0,
+        "filledQuantity": 200.0,
+        "averageFillPrice": 0.65,
+    })
+    text = handlers._format_filled_receipt(response)
+    assert "confirmed" in text.lower()
+    assert "FILLED" in text
+    assert "BUY" in text

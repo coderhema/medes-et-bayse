@@ -232,15 +232,13 @@ def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
     market_id = str(
         signal.get("market_id")
         or signal.get("marketId")
-        or signal.get("event_id")
-        or signal.get("eventId")
         or ""
     ).strip()
     outcome_label = str(signal.get("outcome_label") or signal.get("outcome") or "").strip().upper()
     if not outcome_label:
         raw_side = side.lower()
         outcome_label = "YES" if raw_side in {"yes", "buy", "long"} else "NO"
-    event_id = str(signal.get("event_id") or signal.get("eventId") or market_id).strip()
+    event_id = str(signal.get("event_id") or signal.get("eventId") or "").strip()
 
     if side == "YES" or side == "BUY":
         price = signal.get("yes_price") or signal.get("market_prob") or signal.get("price")
@@ -344,11 +342,11 @@ def run_cycle(
         )
         if not dry_run:
             event_id, market_id, outcome_label, currency, price = _resolve_trade_args(signal)
-            if not market_id or not outcome_label:
+            if not event_id or not market_id or not outcome_label:
                 logger.warning(
-                    f"Skipping live trade for {signal.get('event_title', 'unknown event')} because market/outcome identifiers are missing."
+                    f"Skipping live trade for {signal.get('event_title', 'unknown event')} because canonical event/market/outcome identifiers are missing."
                 )
-                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing market_id/outcome_label"}})
+                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing event_id/market_id/outcome_label"}})
                 continue
 
             result = client.place_order(

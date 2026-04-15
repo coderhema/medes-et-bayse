@@ -421,6 +421,21 @@ class TelegramHandler:
                 data["active_trade_context"] = ctx
         return ctx
 
+    def _trade_context_snapshot(self, context: Any) -> dict[str, Any]:
+        """Return a safe copy of the active or pending trade context."""
+        ctx = self._normalize_trade_context(context)
+        if ctx:
+            return dict(ctx)
+        data = getattr(context, "user_data", None)
+        if not isinstance(data, dict):
+            return {}
+        pending = data.get("pending_trade_context")
+        if isinstance(pending, dict):
+            snapshot = dict(pending)
+            self._sync_trade_context_aliases(snapshot)
+            return snapshot
+        return {}
+
     @staticmethod
     def _trade_context_ready(ctx: dict[str, Any]) -> bool:
         return all(_normalize_text(ctx.get(key)) for key in ("event_id", "market_id", "outcome_id", "currency"))
@@ -529,26 +544,70 @@ class TelegramHandler:
             lines.append(f"• {title}\n  id: {event_id}\n  status: {status}")
         return "\n".join(lines)
 
-    def _format_balance(self, assets: list[dict]) -> str:
-        if not assets:
+    @staticmethod
+    def _payload_dict_list(payload: Any, keys: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = [item for item in value if isinstance(item, dict)]
+                if items:
+                    return items
+            if isinstance(value, dict):
+                return [value]
+        if any(k in payload for k in ("symbol", "availableBalance", "pendingBalance", "network", "balance", "currentValue", "averagePrice", "outcomeId", "outcome", "market")):
+            return [payload]
+        return []
+
+    @staticmethod
+    def _payload_dict_list(payload: Any, keys: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = [item for item in value if isinstance(item, dict)]
+                if items:
+                    return items
+            if isinstance(value, dict):
+                return [value]
+        if any(k in payload for k in ("symbol", "availableBalance", "pendingBalance", "network", "balance", "currentValue", "averagePrice", "outcomeId", "outcome", "market")):
+            return [payload]
+        return []
+
+    def _format_balance(self, assets: Any) -> str:
+        asset_list = self._payload_dict_list(assets, ("assets", "balances", "data", "result", "wallet", "account"))
+        if not asset_list:
             return "No wallet assets found."
         lines = []
-        for asset in assets:
-            symbol = asset.get("symbol", "?")
-            available = self._fmt_money(asset.get("availableBalance", 0))
-            pending = self._fmt_money(asset.get("pendingBalance", 0))
-            network = asset.get("network", "n/a")
+        for asset in asset_list:
+            symbol = _normalize_text(asset.get("symbol") or asset.get("currency") or asset.get("name") or "?")
+            available = self._fmt_money(
+                asset.get("availableBalance")
+                or asset.get("available")
+                or asset.get("balance")
+                or asset.get("cashBalance")
+                or asset.get("cash")
+                or 0,
+            )
+            pending = self._fmt_money(asset.get("pendingBalance") or asset.get("pending") or 0)
+            network = _normalize_text(asset.get("network") or asset.get("chain") or asset.get("provider") or "n/a")
             lines.append(f"• {symbol}: available {available}, pending {pending} ({network})")
         return "\n".join(lines)
 
     def _format_portfolio(self, portfolio) -> str:
         if isinstance(portfolio, dict):
-            positions = portfolio.get("outcomeBalances") or portfolio.get("data") or portfolio.get("positions") or []
-            total_cost = portfolio.get("portfolioCost")
-            total_value = portfolio.get("portfolioCurrentValue")
-            pct_change = portfolio.get("portfolioPercentageChange")
+            positions = self._payload_dict_list(portfolio, ("outcomeBalances", "positions", "openPositions", "holdings", "portfolioPositions", "assets", "items"))
+            total_cost = _mapping_value(portfolio, "portfolioCost")
+            total_value = _mapping_value(portfolio, "portfolioCurrentValue")
+            pct_change = _mapping_value(portfolio, "portfolioPercentageChange")
         else:
-            positions = portfolio or []
+            positions = self._payload_dict_list(portfolio)
             total_cost = total_value = pct_change = None
 
         if not positions:
@@ -556,13 +615,22 @@ class TelegramHandler:
 
         lines = []
         for pos in positions:
-            market = pos.get("market", {})
-            event = market.get("event", {})
-            title = event.get("title") or market.get("title") or "Unknown market"
-            outcome = pos.get("outcome", pos.get("outcomeId", "?"))
-            balance = self._fmt_money(pos.get("balance", 0))
-            current_value = self._fmt_money(pos.get("currentValue", 0))
-            avg_price = self._fmt_float(pos.get("averagePrice", 0))
+            market = pos.get("market", {}) if isinstance(pos.get("market"), dict) else {}
+            event = market.get("event", {}) if isinstance(market.get("event"), dict) else {}
+            title = (
+                event.get("title")
+                or event.get("name")
+                or market.get("title")
+                or market.get("name")
+                or pos.get("title")
+                or pos.get("name")
+                or pos.get("symbol")
+                or "Unknown market"
+            )
+            outcome = pos.get("outcome", pos.get("outcomeId", pos.get("outcome_id", "?")))
+            balance = self._fmt_money(pos.get("balance", pos.get("quantity", pos.get("size", 0))))
+            current_value = self._fmt_money(pos.get("currentValue", pos.get("current_value", pos.get("marketValue", 0))))
+            avg_price = self._fmt_float(pos.get("averagePrice", pos.get("avgPrice", pos.get("avg_price", 0))))
             lines.append(f"• {title} [{outcome}]\n  balance: {balance}\n  avg price: {avg_price}\n  current value: {current_value}")
 
         summary = []
@@ -776,19 +844,30 @@ class TelegramHandler:
 
     @staticmethod
     def _format_order(result: dict) -> str:
-        order = result.get("order", result)
-        engine = result.get("engine", "unknown")
+        order = result.get("order") if isinstance(result, dict) and isinstance(result.get("order"), dict) else result
+        if not isinstance(order, dict):
+            order = result if isinstance(result, dict) else {}
+        engine = _first_string(result.get("engine") if isinstance(result, dict) else None, result.get("strategy") if isinstance(result, dict) else None, default="unknown") if isinstance(result, dict) else "unknown"
+        order_id = _first_string(order.get("id"), order.get("orderId"), order.get("order_id"), _mapping_value(result, "data", "order", "id") if isinstance(result, dict) else None, default="unknown")
+        status = _first_string(order.get("status"), order.get("state"), result.get("status") if isinstance(result, dict) else None, result.get("state") if isinstance(result, dict) else None, default="unknown")
+        side = _first_string(order.get("side"), order.get("direction"), result.get("side") if isinstance(result, dict) else None, default="unknown")
+        order_type = _first_string(order.get("type"), order.get("orderType"), result.get("type") if isinstance(result, dict) else None, default="unknown")
+        outcome = _first_string(order.get("outcome"), order.get("outcomeId"), order.get("outcome_id"), result.get("outcome") if isinstance(result, dict) else None, default="unknown")
+        price = order.get("price", result.get("price", 0) if isinstance(result, dict) else 0)
+        quantity = order.get("quantity", order.get("qty", result.get("quantity", result.get("qty", 0)) if isinstance(result, dict) else 0))
+        amount = order.get("amount", result.get("amount", 0) if isinstance(result, dict) else 0)
+        currency = _first_string(order.get("currency"), result.get("currency") if isinstance(result, dict) else None, default="USD")
         return (
             f"<b>Order placed</b>\n"
             f"Engine: {engine}\n"
-            f"Order ID: {order.get('id', 'unknown')}\n"
-            f"Status: {order.get('status', 'unknown')}\n"
-            f"Side: {order.get('side', 'unknown')}\n"
-            f"Type: {order.get('type', 'unknown')}\n"
-            f"Outcome: {order.get('outcome', 'unknown')}\n"
-            f"Price: {float(order.get('price', 0)):.4f}\n"
-            f"Quantity: {float(order.get('quantity', 0)):.2f}\n"
-            f"Amount: {float(order.get('amount', 0)):.2f} {order.get('currency', 'USD')}"
+            f"Order ID: {order_id}\n"
+            f"Status: {status}\n"
+            f"Side: {side}\n"
+            f"Type: {order_type}\n"
+            f"Outcome: {outcome}\n"
+            f"Price: {float(price or 0):.4f}\n"
+            f"Quantity: {float(quantity or 0):.2f}\n"
+            f"Amount: {float(amount or 0):.2f} {currency}"
         )
 
     def _usage_quote(self) -> str:
@@ -1028,6 +1107,8 @@ class TelegramHandler:
                 return
             amount = float(amount_match.group(1))
             active = self._resolve_trade_context(context)
+            if not self._trade_context_ready(active):
+                active = self._trade_context_snapshot(context)
             if not self._trade_context_ready(active):
                 if isinstance(ud, dict):
                     ud.pop("pending_action", None)
@@ -1284,6 +1365,9 @@ class TelegramHandler:
                 "Context lost. Please use /events to start fresh.", parse_mode="HTML"
             )
             return
+        ud = getattr(context, "user_data", {})
+        if isinstance(ud, dict):
+            ud["pending_trade_context"] = dict(active)
 
         resolved_event_id = _normalize_text(active.get("event_id"))
         resolved_market_id = _normalize_text(active.get("market_id"))
@@ -1302,7 +1386,7 @@ class TelegramHandler:
                 break
 
         label = outcome_title or resolved_outcome_id
-        keyboard = InlineKeyboardMarkup([[
+        keyboard = InlineKeyboardMarkup([[ 
             InlineKeyboardButton("NGN", callback_data=f"currency:{resolved_event_id}:{resolved_market_id}:{resolved_outcome_id}:NGN"),
             InlineKeyboardButton("USD", callback_data=f"currency:{resolved_event_id}:{resolved_market_id}:{resolved_outcome_id}:USD"),
         ]])
@@ -1338,6 +1422,7 @@ class TelegramHandler:
         ud = getattr(context, "user_data", {})
         if isinstance(ud, dict):
             ud["pending_action"] = "awaiting_amount"
+            ud["pending_trade_context"] = dict(active)
         await query.edit_message_text(
             f"Currency: <b>{currency}</b>\nHow much?",
             parse_mode="HTML",

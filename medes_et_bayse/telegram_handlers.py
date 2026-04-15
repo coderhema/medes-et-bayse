@@ -24,6 +24,7 @@ DEBUG_SPAM_PHRASES = {"no signals this cycle"}
 WATCHLIST_PAGE_SIZE = 10
 GENERAL_QUANT_GUIDANCE = "quant best practice: prefer limit orders, size positions deliberately, and define an exit before entry."
 FILLED_ORDER_STATUSES = {"filled", "executed", "complete", "completed", "success", "successfully placed"}
+PLACEHOLDER_ORDER_VALUES = {"", "n/a", "na", "none", "null", "unknown", "-"}
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +87,43 @@ def _first_string(*values: Any, default: str = "") -> str:
         if text:
             return text
     return default
+
+
+def _is_placeholder_order_value(value: Any) -> bool:
+    return _normalize_text(value).lower() in PLACEHOLDER_ORDER_VALUES
+
+
+def _canonical_trade_ids(*sources: Any) -> tuple[str, str]:
+    event_id = ""
+    market_id = ""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_event_id = _first_string(source.get("event_id"), source.get("eventId"), source.get("eventid"), default="")
+        source_market_id = _first_string(source.get("market_id"), source.get("marketId"), source.get("marketid"), default="")
+        if source_event_id and source_market_id:
+            event_id = source_event_id
+            market_id = source_market_id
+            break
+        if source_event_id and not event_id:
+            event_id = source_event_id
+        if source_market_id and not market_id:
+            market_id = source_market_id
+    return event_id, market_id
+
+
+def _is_suspicious_event_id(event_id: str, market_id: str, outcome_id: str = "") -> bool:
+    normalized_event = _normalize_text(event_id)
+    if not normalized_event:
+        return True
+    lowered_event = normalized_event.lower()
+    if lowered_event in PLACEHOLDER_ORDER_VALUES:
+        return True
+    if any(char.isspace() for char in normalized_event):
+        return True
+    lowered_market = _normalize_text(market_id).lower()
+    lowered_outcome = _normalize_text(outcome_id).lower()
+    return lowered_event in {"yes", "no", "buy", "sell", lowered_market, lowered_outcome}
 
 
 def _mapping_value(mapping: Any, *path: str) -> Any:
@@ -364,18 +402,24 @@ def _is_empty_order_response(response: "OrderResponse") -> bool:
     order = response.order
     raw = response.raw or {}
     has_id = bool(order.order_id)
-    has_status = bool(
+    resolved_status = (
         order.status
         or _deep_mapping_value(raw, "status")
         or _deep_mapping_value(raw, "state")
         or _deep_mapping_value(raw, "order", "status")
         or _deep_mapping_value(raw, "order", "state")
     )
-    has_side = bool(
+    has_status = bool(resolved_status) and not _is_placeholder_order_value(
+        resolved_status
+    )
+    resolved_side = (
         order.side
         or _deep_mapping_value(raw, "side")
         or _deep_mapping_value(raw, "direction")
         or _deep_mapping_value(raw, "order", "side")
+    )
+    has_side = bool(resolved_side) and not _is_placeholder_order_value(
+        resolved_side
     )
     has_amount = bool(
         order.amount
@@ -877,24 +921,16 @@ def _set_trade_order_state(context: Any, candidate: dict[str, Any], **fields: An
     state = data.get("trade_order_state")
     if not isinstance(state, dict):
         state = {}
-    event_id = _first_string(
-        candidate.get("event_id"),
-        candidate.get("eventId"),
-        candidate.get("eventid"),
-        state.get("event_id"),
-        state.get("eventId"),
-        state.get("eventid"),
-        default="",
-    )
-    market_id = _first_string(
-        candidate.get("market_id"),
-        candidate.get("marketId"),
-        candidate.get("marketid"),
-        state.get("market_id"),
-        state.get("marketId"),
-        state.get("marketid"),
-        default="",
-    )
+    _sync_candidate_ids(candidate)
+    state_event_id, state_market_id = _canonical_trade_ids(state)
+    candidate_event_id, candidate_market_id = _canonical_trade_ids(candidate)
+    candidate_ids_are_safe = bool(candidate_event_id and candidate_market_id) and not _is_suspicious_event_id(candidate_event_id, candidate_market_id)
+    if candidate_ids_are_safe and (not state_event_id or not state_market_id or candidate_market_id != state_market_id):
+        event_id = candidate_event_id
+        market_id = candidate_market_id
+    else:
+        event_id, market_id = _canonical_trade_ids(state, candidate)
+    outcome_id = _first_string(fields.get("outcome_id"), state.get("outcome_id"), state.get("outcomeId"), state.get("outcomeid"), default="")
     state.update({
         "candidate": candidate,
         "event": candidate.get("event") if isinstance(candidate.get("event"), dict) else {},
@@ -907,7 +943,9 @@ def _set_trade_order_state(context: Any, candidate: dict[str, Any], **fields: An
         "marketid": market_id,
         "event_title": _first_string(candidate.get("event_title"), default=""),
         "market_title": _first_string(candidate.get("market_title"), default=""),
-        "outcome_id": _first_string(fields.get("outcome_id") or state.get("outcome_id"), default=""),
+        "outcome_id": outcome_id,
+        "outcomeId": outcome_id,
+        "outcomeid": outcome_id,
         "outcome_label": _first_string(fields.get("outcome_label") or state.get("outcome_label"), default=""),
         "side": _normalize_text(fields.get("side") or state.get("side")).lower(),
         "currency": _normalize_text(fields.get("currency") or state.get("currency")).upper(),
@@ -982,8 +1020,10 @@ def _set_trade_selection(
     data = getattr(context, "user_data", None)
     if not isinstance(data, dict):
         return
+    _sync_candidate_ids(candidate)
     event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
     market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
+    resolved_outcome_id = _first_string(outcome_id, default="")
     data["trade_selection"] = {
         "candidate": candidate,
         "event": candidate.get("event") if isinstance(candidate.get("event"), dict) else {},
@@ -994,7 +1034,9 @@ def _set_trade_selection(
         "market_id": market_id,
         "marketId": market_id,
         "marketid": market_id,
-        "outcome_id": _first_string(outcome_id, default=""),
+        "outcome_id": resolved_outcome_id,
+        "outcomeId": resolved_outcome_id,
+        "outcomeid": resolved_outcome_id,
         "outcome_label": _first_string(outcome_label, default=""),
         "side": _normalize_text(side).lower(),
     }
@@ -1362,8 +1404,16 @@ def _candidate_from_state(state: Any) -> Optional[dict[str, Any]]:
         return None
     candidate = state.get("candidate")
     if isinstance(candidate, dict):
-        event_id = _first_string(candidate.get("event_id"), candidate.get("eventId"), candidate.get("eventid"), default="")
-        market_id = _first_string(candidate.get("market_id"), candidate.get("marketId"), candidate.get("marketid"), default="")
+        state_event_id, state_market_id = _canonical_trade_ids(state)
+        if state_event_id and state_market_id:
+            candidate["event_id"] = state_event_id
+            candidate["eventId"] = state_event_id
+            candidate["eventid"] = state_event_id
+            candidate["market_id"] = state_market_id
+            candidate["marketId"] = state_market_id
+            candidate["marketid"] = state_market_id
+        _sync_candidate_ids(candidate)
+        event_id, market_id = _canonical_trade_ids(candidate)
         if event_id and market_id:
             return candidate
     event_id = _first_string(state.get("event_id"), state.get("eventId"), state.get("eventid"), default="")
@@ -1649,7 +1699,7 @@ def build_quote_command(client: BayseClient, text: str, context: Any = None) -> 
 
 def build_order_command(client: BayseClient, text: str, context: Any = None) -> CommandResult:
     args = _split_args(text)
-    active_candidate = _active_market_candidate(context)
+    active_candidate = _trade_context_candidate(context) or _active_market_candidate(context)
     selected_trade = _active_trade_selection(context)
     order_state = _active_trade_order_state(context)
     if not isinstance(selected_trade, dict) and isinstance(order_state, dict):
@@ -1685,29 +1735,10 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
     outcome_text = ""
     outcome_id = ""
 
-    event_id = _first_string(
-        context_candidate.get("event_id") if use_active_context and isinstance(context_candidate, dict) else None,
-        context_candidate.get("eventId") if use_active_context and isinstance(context_candidate, dict) else None,
-        context_candidate.get("eventid") if use_active_context and isinstance(context_candidate, dict) else None,
-        order_state.get("event_id") if use_active_context and isinstance(order_state, dict) else None,
-        order_state.get("eventId") if use_active_context and isinstance(order_state, dict) else None,
-        order_state.get("eventid") if use_active_context and isinstance(order_state, dict) else None,
-        selected_trade.get("event_id") if use_active_context and isinstance(selected_trade, dict) else None,
-        selected_trade.get("eventId") if use_active_context and isinstance(selected_trade, dict) else None,
-        selected_trade.get("eventid") if use_active_context and isinstance(selected_trade, dict) else None,
-        default="",
-    )
-    market_id = _first_string(
-        context_candidate.get("market_id") if use_active_context and isinstance(context_candidate, dict) else None,
-        context_candidate.get("marketId") if use_active_context and isinstance(context_candidate, dict) else None,
-        context_candidate.get("marketid") if use_active_context and isinstance(context_candidate, dict) else None,
-        order_state.get("market_id") if use_active_context and isinstance(order_state, dict) else None,
-        order_state.get("marketId") if use_active_context and isinstance(order_state, dict) else None,
-        order_state.get("marketid") if use_active_context and isinstance(order_state, dict) else None,
-        selected_trade.get("market_id") if use_active_context and isinstance(selected_trade, dict) else None,
-        selected_trade.get("marketId") if use_active_context and isinstance(selected_trade, dict) else None,
-        selected_trade.get("marketid") if use_active_context and isinstance(selected_trade, dict) else None,
-        default="",
+    event_id, market_id = _canonical_trade_ids(
+        context_candidate if use_active_context and isinstance(context_candidate, dict) else None,
+        order_state if use_active_context and isinstance(order_state, dict) else None,
+        selected_trade if use_active_context and isinstance(selected_trade, dict) else None,
     )
     side = _normalize_text((order_state or {}).get("side") or (selected_trade.get("side") if isinstance(selected_trade, dict) else "")).lower()
     if side == "long":
@@ -1789,6 +1820,29 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
         return CommandResult(False, "Choose a currency first, then send the amount.", raw={"next_step": "currency"})
     if not outcome_text:
         outcome_text = "YES" if side in {"buy", "long"} else "NO"
+    if not outcome_id:
+        outcome_id = _first_string(
+            selected_trade.get("outcome_id") if isinstance(selected_trade, dict) else None,
+            selected_trade.get("outcomeId") if isinstance(selected_trade, dict) else None,
+            selected_trade.get("outcomeid") if isinstance(selected_trade, dict) else None,
+            order_state.get("outcome_id") if isinstance(order_state, dict) else None,
+            order_state.get("outcomeId") if isinstance(order_state, dict) else None,
+            order_state.get("outcomeid") if isinstance(order_state, dict) else None,
+            default="",
+        )
+    if _is_suspicious_event_id(event_id, market_id, outcome_id):
+        logger.warning(
+            "Blocking place_order due to suspicious canonical IDs eventId=%r marketId=%r outcomeId=%r candidate=%r",
+            event_id,
+            market_id,
+            outcome_id,
+            context_candidate,
+        )
+        return CommandResult(
+            False,
+            "I couldn't verify the active event ID. Please re-select the market with /events before placing the order.",
+            raw={"next_step": "events", "blocked": "suspicious_event_id", "event_id": event_id, "market_id": market_id, "outcome_id": outcome_id},
+        )
 
     for token in trailing:
         if price is None:
@@ -1798,6 +1852,15 @@ def build_order_command(client: BayseClient, text: str, context: Any = None) -> 
                 continue
 
     try:
+        logger.info(
+            "place_order canonical identifiers: eventId=%s marketId=%s outcomeId=%s side=%s amount=%s currency=%s",
+            event_id,
+            market_id,
+            outcome_id,
+            side,
+            amount,
+            currency,
+        )
         response_payload = client.place_order(
             event_id,
             market_id,

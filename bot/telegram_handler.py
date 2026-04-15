@@ -134,6 +134,7 @@ def _brain_parse_trade_intent(text: str, active_context: dict[str, Any]) -> dict
 
 
 FILLED_ORDER_STATUSES = {"filled", "executed", "complete", "completed", "success", "successfully placed"}
+PLACEHOLDER_ORDER_VALUES = {"", "n/a", "na", "none", "null", "unknown", "-"}
 
 
 def _is_empty_order_result(result: dict) -> bool:
@@ -423,6 +424,20 @@ class TelegramHandler:
     @staticmethod
     def _trade_context_ready(ctx: dict[str, Any]) -> bool:
         return all(_normalize_text(ctx.get(key)) for key in ("event_id", "market_id", "outcome_id", "currency"))
+
+    @staticmethod
+    def _is_suspicious_event_id(event_id: str, market_id: str, outcome_id: str = "") -> bool:
+        normalized_event = _normalize_text(event_id)
+        if not normalized_event:
+            return True
+        lowered_event = normalized_event.lower()
+        if lowered_event in PLACEHOLDER_ORDER_VALUES:
+            return True
+        if any(char.isspace() for char in normalized_event):
+            return True
+        lowered_market = _normalize_text(market_id).lower()
+        lowered_outcome = _normalize_text(outcome_id).lower()
+        return lowered_event in {"yes", "no", "buy", "sell", lowered_market, lowered_outcome}
 
     def _update_active_context(self, context: Any, **kwargs: Any) -> None:
         """Update individual fields of the active trade context without replacing the whole dict."""
@@ -1023,13 +1038,37 @@ class TelegramHandler:
             if isinstance(ud, dict):
                 ud.pop("pending_action", None)
             side = active.get("side", "BUY").upper()
+            event_id = _normalize_text(active.get("event_id"))
+            market_id = _normalize_text(active.get("market_id"))
+            outcome_id = _normalize_text(active.get("outcome_id")) or _outcome_label(side)
+            if self._is_suspicious_event_id(event_id, market_id, outcome_id):
+                logger.warning(
+                    "Blocking place_order due to suspicious canonical IDs eventId=%r marketId=%r outcomeId=%r",
+                    event_id,
+                    market_id,
+                    outcome_id,
+                )
+                await message.reply_text(
+                    "I couldn't verify the active event ID. Please re-select the market with /events before placing that order.",
+                    parse_mode="HTML",
+                )
+                return
             try:
+                logger.info(
+                    "place_order canonical identifiers: eventId=%s marketId=%s outcomeId=%s side=%s amount=%s currency=%s",
+                    event_id,
+                    market_id,
+                    outcome_id,
+                    side,
+                    amount,
+                    active["currency"],
+                )
                 result = await asyncio.to_thread(
                     self._require_client().place_order,
-                    active["event_id"],
-                    active["market_id"],
+                    event_id,
+                    market_id,
                     side,
-                    _outcome_label(side),
+                    outcome_id,
                     amount,
                     active["currency"],
                     "MARKET",
@@ -1082,14 +1121,37 @@ class TelegramHandler:
             )
             return
         currency = _normalize_text(parsed.get("currency") or parsed.get("normalized_currency") or active.get("currency") or "USD").upper()
-        outcome = _outcome_label(parsed.get("outcome") or parsed.get("side") or active.get("side") or side)
+        outcome_label = _outcome_label(parsed.get("outcome") or parsed.get("side") or active.get("side") or side)
+        event_id = _normalize_text(active.get("event_id"))
+        market_id = _normalize_text(active.get("market_id"))
+        if self._is_suspicious_event_id(event_id, market_id, outcome_label):
+            logger.warning(
+                "Blocking place_order due to suspicious canonical IDs eventId=%r marketId=%r outcomeId=%r",
+                event_id,
+                market_id,
+                outcome_label,
+            )
+            await message.reply_text(
+                "I couldn't verify the active event ID. Please re-select the market with /events before placing that order.",
+                parse_mode="HTML",
+            )
+            return
         try:
+            logger.info(
+                "place_order canonical identifiers: eventId=%s marketId=%s outcomeId=%s side=%s amount=%s currency=%s",
+                event_id,
+                market_id,
+                outcome_label,
+                side,
+                amount,
+                currency,
+            )
             result = await asyncio.to_thread(
                 self._require_client().place_order,
-                active["event_id"],
-                active["market_id"],
+                event_id,
+                market_id,
                 side,
-                outcome,
+                outcome_label,
                 amount,
                 currency,
                 "MARKET",
@@ -1113,8 +1175,8 @@ class TelegramHandler:
                 text = _format_order_receipt(result)
             else:
                 text = self._format_order(result)
-            self._store_active_context(context, event_id=active["event_id"], market_id=active["market_id"], outcome_id=outcome, currency=currency, side=side)
-            view_key = _detail_key("smart-trade", f"{active['event_id']}:{active['market_id']}:{outcome_id}:{amount}:{currency}:{side}")
+            self._store_active_context(context, event_id=event_id, market_id=market_id, outcome_id=outcome_label, currency=currency, side=side)
+            view_key = _detail_key("smart-trade", f"{event_id}:{market_id}:{outcome_label}:{amount}:{currency}:{side}")
             text, keyboard = self._format_with_view_more(context, text, view_key=view_key)
         except Exception as e:
             text, keyboard = f"Error placing smart trade: {e}", None

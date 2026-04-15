@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import threading
 import time
@@ -28,6 +29,7 @@ except Exception as exc:  # pragma: no cover - optional dependency fallback
     logger.warning(f"Telegram handler unavailable: {exc}")
 
 load_dotenv()
+PLACEHOLDER_ORDER_VALUES = {"", "n/a", "na", "none", "null", "unknown", "-"}
 
 
 def _env(*names: str, default: str = "") -> str:
@@ -50,6 +52,20 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _market_id_from_event(event: dict) -> str:
     return str(event.get("marketId") or event.get("market_id") or event.get("id") or "").strip()
+
+
+def _is_suspicious_event_id(event_id: str, market_id: str, outcome_id: str = "") -> bool:
+    normalized_event = str(event_id or "").strip()
+    if not normalized_event:
+        return True
+    lowered_event = normalized_event.lower()
+    if lowered_event in PLACEHOLDER_ORDER_VALUES:
+        return True
+    if any(char.isspace() for char in normalized_event):
+        return True
+    lowered_market = str(market_id or "").strip().lower()
+    lowered_outcome = str(outcome_id or "").strip().lower()
+    return lowered_event in {"yes", "no", "buy", "sell", lowered_market, lowered_outcome}
 
 
 def _attach_live_quotes(events: list[dict], quote_manager: Optional[QuoteManager]) -> None:
@@ -214,6 +230,24 @@ def _execute_quote_plan(client: BayseClient, quote_plan: dict, dry_run: bool, cu
                 'amount': round(amount, 2),
             }
         else:
+            if _is_suspicious_event_id(event_id, market_id, outcome_id):
+                logger.warning(
+                    "Skipping quote placement due to suspicious IDs eventId={!r} marketId={!r} outcomeId={!r}",
+                    event_id,
+                    market_id,
+                    outcome_id,
+                )
+                continue
+            logger.info(
+                "place_order canonical identifiers: eventId={} marketId={} outcomeId={} side={} amount={} currency={} price={}",
+                event_id,
+                market_id,
+                outcome_id,
+                side,
+                amount,
+                currency,
+                price,
+            )
             result = client.place_post_only_limit_order(
                 event_id=event_id,
                 market_id=market_id,
@@ -349,7 +383,27 @@ def run_cycle(
                 )
                 executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing event_id/market_id/outcome_label"}})
                 continue
+            if _is_suspicious_event_id(event_id, market_id, outcome_label):
+                logger.warning(
+                    "Skipping live trade for {} because event_id={} is suspicious for market_id={} outcome_id={}.",
+                    signal.get("event_title", "unknown event"),
+                    event_id,
+                    market_id,
+                    outcome_label,
+                )
+                executed.append({**signal, "trade_result": {"skipped": True, "reason": "suspicious_event_id"}})
+                continue
 
+            logger.info(
+                "place_order canonical identifiers: eventId={} marketId={} outcomeId={} side={} amount={} currency={} price={}",
+                event_id,
+                market_id,
+                outcome_label,
+                str(signal["side"]),
+                float(signal["stake"]),
+                currency,
+                price,
+            )
             result = client.place_order(
                 event_id=event_id,
                 market_id=market_id,

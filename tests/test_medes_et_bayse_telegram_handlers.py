@@ -201,6 +201,30 @@ def test_tradec_currency_selection_propagates_to_trade_amount_state():
     assert context.user_data["pending_interaction"]["kind"] == "trade_amount"
 
 
+def test_tradec_currency_selection_does_not_overwrite_canonical_event_id():
+    """Currency step must preserve the original canonical IDs even if candidate aliases drift."""
+    context = SimpleNamespace(user_data={})
+    candidate = _make_candidate_with_market("evt_origin", "mkt_origin")
+    handlers._set_trade_order_state(context, candidate, outcome_id="out_yes", outcome_label="Yes", side="buy", stage="currency")
+    handlers._set_active_market_context(context, candidate)
+
+    drifted_candidate = _make_candidate_with_market("Event label should not be event_id", "Market label should not be market_id")
+    handlers._set_trade_order_state(
+        context,
+        drifted_candidate,
+        outcome_id="out_yes",
+        outcome_label="Yes",
+        side="buy",
+        currency="USD",
+        stage="amount",
+    )
+
+    updated_state = context.user_data["trade_order_state"]
+    assert updated_state["event_id"] == "evt_origin"
+    assert updated_state["market_id"] == "mkt_origin"
+    assert updated_state["currency"] == "USD"
+
+
 def test_trade_amount_reply_uses_canonical_ids_to_place_order():
     """After tradec sets currency, a trade_amount reply must place the order with the correct IDs."""
     client = StubClient()
@@ -330,6 +354,57 @@ def test_build_order_command_suppresses_empty_response():
     assert result.ok is False
     assert isinstance(result.raw, dict)
     assert result.raw.get("suppressed") is True
+
+
+def test_build_order_command_suppresses_na_only_response():
+    """n/a-only placeholder payloads must be suppressed instead of formatted as an update."""
+
+    class PlaceholderResponseClient:
+        calls = []
+
+        def place_order(self, event_id, market_id, *, outcome_id, side, amount, currency, order_type="MARKET", price=None):
+            self.calls.append({})
+            return {
+                "status": "n/a",
+                "side": "n/a",
+                "order": {"status": "n/a", "side": "n/a"},
+            }
+
+    client = PlaceholderResponseClient()
+    context = make_context()
+
+    result = handlers.build_order_command(client, "250", context=context)
+
+    assert result is not None
+    assert result.ok is False
+    assert isinstance(result.raw, dict)
+    assert result.raw.get("suppressed") is True
+
+
+def test_build_order_command_blocks_suspicious_event_id():
+    """Orders must not be sent when event_id looks suspicious or non-canonical."""
+    client = StubClient()
+    context = SimpleNamespace(
+        user_data={
+            "active_market_candidate": _make_candidate_with_market("Market label instead of event id", "mkt_good"),
+            "trade_order_state": {
+                "event_id": "Market label instead of event id",
+                "market_id": "mkt_good",
+                "outcome_id": "out_yes",
+                "side": "buy",
+                "currency": "USD",
+                "outcome_label": "Yes",
+                "stage": "ready",
+            },
+        }
+    )
+
+    result = handlers.build_order_command(client, "100", context=context)
+
+    assert result is not None
+    assert result.ok is False
+    assert "couldn't verify the active event ID" in result.text
+    assert client.calls == []
 
 
 def test_build_order_command_returns_ok_for_response_with_order_id():

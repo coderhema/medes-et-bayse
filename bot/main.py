@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import threading
 import time
@@ -19,7 +18,6 @@ from bot.realtime_feed import QuoteManager
 from bot.strategies.arbitrage import ArbitrageStrategy
 from bot.strategies.kelly import KellyStrategy
 from bot.strategies.market_maker import MarketMakerStrategy, extract_inventory_units
-from bot.strategies.quant_advisory import QuantAdvisory
 from bot.strategies.spread_capture import SpreadCaptureEngine
 
 try:
@@ -29,7 +27,6 @@ except Exception as exc:  # pragma: no cover - optional dependency fallback
     logger.warning(f"Telegram handler unavailable: {exc}")
 
 load_dotenv()
-PLACEHOLDER_ORDER_VALUES = {"", "n/a", "na", "none", "null", "unknown", "-"}
 
 
 def _env(*names: str, default: str = "") -> str:
@@ -52,20 +49,6 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _market_id_from_event(event: dict) -> str:
     return str(event.get("marketId") or event.get("market_id") or event.get("id") or "").strip()
-
-
-def _is_suspicious_event_id(event_id: str, market_id: str, outcome_id: str = "") -> bool:
-    normalized_event = str(event_id or "").strip()
-    if not normalized_event:
-        return True
-    lowered_event = normalized_event.lower()
-    if lowered_event in PLACEHOLDER_ORDER_VALUES:
-        return True
-    if any(char.isspace() for char in normalized_event):
-        return True
-    lowered_market = str(market_id or "").strip().lower()
-    lowered_outcome = str(outcome_id or "").strip().lower()
-    return lowered_event in {"yes", "no", "buy", "sell", lowered_market, lowered_outcome}
 
 
 def _attach_live_quotes(events: list[dict], quote_manager: Optional[QuoteManager]) -> None:
@@ -230,24 +213,6 @@ def _execute_quote_plan(client: BayseClient, quote_plan: dict, dry_run: bool, cu
                 'amount': round(amount, 2),
             }
         else:
-            if _is_suspicious_event_id(event_id, market_id, outcome_id):
-                logger.warning(
-                    "Skipping quote placement due to suspicious IDs eventId={!r} marketId={!r} outcomeId={!r}",
-                    event_id,
-                    market_id,
-                    outcome_id,
-                )
-                continue
-            logger.info(
-                "place_order canonical identifiers: eventId={} marketId={} outcomeId={} side={} amount={} currency={} price={}",
-                event_id,
-                market_id,
-                outcome_id,
-                side,
-                amount,
-                currency,
-                price,
-            )
             result = client.place_post_only_limit_order(
                 event_id=event_id,
                 market_id=market_id,
@@ -267,13 +232,15 @@ def _resolve_trade_args(signal: dict) -> tuple[str, str, str, str, float]:
     market_id = str(
         signal.get("market_id")
         or signal.get("marketId")
+        or signal.get("event_id")
+        or signal.get("eventId")
         or ""
     ).strip()
     outcome_label = str(signal.get("outcome_label") or signal.get("outcome") or "").strip().upper()
     if not outcome_label:
         raw_side = side.lower()
         outcome_label = "YES" if raw_side in {"yes", "buy", "long"} else "NO"
-    event_id = str(signal.get("event_id") or signal.get("eventId") or "").strip()
+    event_id = str(signal.get("event_id") or signal.get("eventId") or market_id).strip()
 
     if side == "YES" or side == "BUY":
         price = signal.get("yes_price") or signal.get("market_prob") or signal.get("price")
@@ -377,33 +344,13 @@ def run_cycle(
         )
         if not dry_run:
             event_id, market_id, outcome_label, currency, price = _resolve_trade_args(signal)
-            if not event_id or not market_id or not outcome_label:
+            if not market_id or not outcome_label:
                 logger.warning(
-                    f"Skipping live trade for {signal.get('event_title', 'unknown event')} because canonical event/market/outcome identifiers are missing."
+                    f"Skipping live trade for {signal.get('event_title', 'unknown event')} because market/outcome identifiers are missing."
                 )
-                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing event_id/market_id/outcome_label"}})
-                continue
-            if _is_suspicious_event_id(event_id, market_id, outcome_label):
-                logger.warning(
-                    "Skipping live trade for {} because event_id={} is suspicious for market_id={} outcome_id={}.",
-                    signal.get("event_title", "unknown event"),
-                    event_id,
-                    market_id,
-                    outcome_label,
-                )
-                executed.append({**signal, "trade_result": {"skipped": True, "reason": "suspicious_event_id"}})
+                executed.append({**signal, "trade_result": {"skipped": True, "reason": "missing market_id/outcome_label"}})
                 continue
 
-            logger.info(
-                "place_order canonical identifiers: eventId={} marketId={} outcomeId={} side={} amount={} currency={} price={}",
-                event_id,
-                market_id,
-                outcome_label,
-                str(signal["side"]),
-                float(signal["stake"]),
-                currency,
-                price,
-            )
             result = client.place_order(
                 event_id=event_id,
                 market_id=market_id,
@@ -415,9 +362,6 @@ def run_cycle(
                 order_type="LIMIT" if price else "MARKET",
                 time_in_force="GTC" if price else None,
             )
-            # Log raw API response so the JSON structure can be inspected.
-            logger.info("place_order raw response: %s", json.dumps(result, default=str))
-            print(json.dumps({"place_order_raw": result}, default=str), flush=True)
             signal["trade_result"] = result
             executed.append(signal)
         else:
@@ -526,10 +470,6 @@ def main():
     min_edge = float(os.getenv("MIN_EDGE", "0.03"))
     max_position_fraction = float(os.getenv("MAX_POSITION_FRACTION", "0.05"))
     quote_currency = _env("BAYSE_CURRENCY", default="USD")
-
-    quant_advisory = QuantAdvisory(min_edge=min_edge)
-    if telegram_handler:
-        telegram_handler.attach_quant_advisory(quant_advisory)
 
     strategy_map = {
         "kelly": [KellyStrategy(bankroll=bankroll, min_edge=min_edge, max_fraction=max_position_fraction)],

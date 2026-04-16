@@ -1,3 +1,6 @@
+<img width="124" height="1024" alt="share_1774484367512" src="https://github.com/user-attachments/assets/fe9107ec-5177-4ddc-806d-1a718eb9bfae" />
+
+
 # medes-et-bayse
 
 A quantitative trading bot for [Bayse Markets](https://bayse.markets) — Africa's largest prediction market platform. Uses the Bayse REST API with Poke API as backend orchestration.

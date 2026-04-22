@@ -1,4 +1,4 @@
-<img width="124" height="1024" alt="share_1774484367512" src="https://github.com/user-attachments/assets/fe9107ec-5177-4ddc-806d-1a718eb9bfae" />
+<img width="124" height="124" alt="share_1774484367512" src="https://github.com/user-attachments/assets/fe9107ec-5177-4ddc-806d-1a718eb9bfae" />
 
 
 # medes-et-bayse

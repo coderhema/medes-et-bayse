@@ -64,7 +64,7 @@ class HermesLoopConfig:
             trade_fraction=float(os.getenv("HERMES_TRADE_FRACTION", "0.05")),
             min_confidence=float(os.getenv("HERMES_MIN_CONFIDENCE", "0.58")),
             max_events=int(os.getenv("HERMES_MAX_EVENTS", "20")),
-            currency=os.getenv("HERMES_CURRENCY", "USD")),
+            currency=os.getenv("HERMES_CURRENCY", "USD"),
             dry_run=os.getenv("HERMES_DRY_RUN", os.getenv("DRY_RUN", "true")).lower() == "true",
             framework_model=framework_model,
             framework_base_url=groq_base_url,

@@ -25,6 +25,13 @@ else:
 
 logger = logging.getLogger(__name__)
 
+def _first_env(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return None
+
 
 @dataclass(frozen=True)
 class HermesLoopConfig:
@@ -43,8 +50,8 @@ class HermesLoopConfig:
 
     @classmethod
     def from_env(cls) -> "HermesLoopConfig":
-        brain_url = os.getenv("POKE_BRAIN_URL", "").strip() or os.getenv("POKE_API_BRAIN_URL", "").strip() or None
-        poke_api_key = os.getenv("POKE_API_KEY", "").strip() or None
+        brain_url = _first_env("POKEBRAINURL", "POKEAPIBRAINURL", "POKE_BRAIN_URL", "POKE_API_BRAIN_URL")
+        poke_api_key = _first_env("POKEAPI_KEY", "POKE_API_KEY")
         framework_model = (
             os.getenv("HERMES_MODEL", "").strip()
             or os.getenv("POKE_MODEL", "").strip()
@@ -97,6 +104,7 @@ class HermesAgent:
 
         return AIAgent(
             model=self.config.framework_model,
+            provider="openai",
             api_key=self.config.framework_api_key,
             base_url=self.config.framework_base_url,
             quiet_mode=True,

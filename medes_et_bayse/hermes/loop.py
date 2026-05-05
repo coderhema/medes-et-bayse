@@ -42,7 +42,7 @@ class HermesLoopConfig:
     max_events: int = 20
     currency: str = "USD"
     dry_run: bool = True
-    framework_model: str = "gpt-4.1-mini"
+    framework_model: str = "llama-3.3-70b-versatile"
     framework_base_url: Optional[str] = None
     framework_api_key: Optional[str] = None
     framework_max_iterations: int = 6
@@ -50,12 +50,13 @@ class HermesLoopConfig:
 
     @classmethod
     def from_env(cls) -> "HermesLoopConfig":
-        brain_url = os.getenv("POKEBRAINURL", "").strip() or None
-        poke_api_key = os.getenv("POKEAPI_KEY", "").strip() or None
+        groq_base_url = os.getenv("GROQ_BASE_URL", "").strip() or "https://api.groq.com/openai/v1"
+        groq_api_key = os.getenv("GROQ_API_KEY", "").strip() or None
         framework_model = (
-            os.getenv("HERMES_MODEL", "").strip()
+            os.getenv("GROQ_MODEL", "").strip()
+            or os.getenv("HERMES_MODEL", "").strip()
             or os.getenv("POKE_MODEL", "").strip()
-            or "gpt-4.1-mini"
+            or "llama-3.3-70b-versatile"
         )
         return cls(
             cycle_interval_seconds=float(os.getenv("HERMES_CYCLE_INTERVAL_SECONDS", "300")),
@@ -63,11 +64,11 @@ class HermesLoopConfig:
             trade_fraction=float(os.getenv("HERMES_TRADE_FRACTION", "0.05")),
             min_confidence=float(os.getenv("HERMES_MIN_CONFIDENCE", "0.58")),
             max_events=int(os.getenv("HERMES_MAX_EVENTS", "20")),
-            currency=os.getenv("HERMES_CURRENCY", "USD"),
+            currency=os.getenv("HERMES_CURRENCY", "USD")),
             dry_run=os.getenv("HERMES_DRY_RUN", os.getenv("DRY_RUN", "true")).lower() == "true",
             framework_model=framework_model,
-            framework_base_url=brain_url,
-            framework_api_key=poke_api_key,
+            framework_base_url=groq_base_url,
+            framework_api_key=groq_api_key,
             framework_max_iterations=int(os.getenv("HERMES_FRAMEWORK_MAX_ITERATIONS", "6")),
             framework_skip_memory=os.getenv("HERMES_FRAMEWORK_SKIP_MEMORY", "true").lower() == "true",
         )
@@ -102,13 +103,18 @@ class HermesAgent:
         if AIAgent is None:  # pragma: no cover
             raise RuntimeError(f"hermes-agent is required to run the embedded framework: {_HERMES_IMPORT_ERROR}")
 
-        provider = "openrouter" if self.config.framework_base_url else None
+        groq_api_key = (self.config.framework_api_key or "").strip()
+        if not groq_api_key:
+            raise RuntimeError("GROQ_API_KEY is required to initialize the Hermes framework agent.")
+
+        groq_base_url = (self.config.framework_base_url or "").strip() or "https://api.groq.com/openai/v1"
+        groq_model = (self.config.framework_model or "").strip() or "llama-3.3-70b-versatile"
 
         return AIAgent(
-            model=self.config.framework_model,
-            provider=provider,
-            api_key=self.config.framework_api_key,
-            base_url=self.config.framework_base_url,
+            model=groq_model,
+            provider="groq",
+            api_key=groq_api_key,
+            base_url=groq_base_url,
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=self.config.framework_skip_memory,

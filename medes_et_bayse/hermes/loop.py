@@ -50,8 +50,14 @@ class HermesLoopConfig:
 
     @classmethod
     def from_env(cls) -> "HermesLoopConfig":
-        brain_url = _first_env("POKEBRAINURL", "POKEAPIBRAINURL", "POKE_BRAIN_URL", "POKE_API_BRAIN_URL")
-        poke_api_key = _first_env("POKEAPI_KEY", "POKE_API_KEY")
+        brain_url = (
+            os.getenv("POKEBRAINURL", "").strip()
+            or os.getenv("POKEAPIBRAINURL", "").strip()
+            or os.getenv("POKE_BRAIN_URL", "").strip()
+            or os.getenv("POKE_API_BRAIN_URL", "").strip()
+            or None
+        )
+        poke_api_key = os.getenv("POKEAPI_KEY", "").strip() or os.getenv("POKE_API_KEY", "").strip() or None
         framework_model = (
             os.getenv("HERMES_MODEL", "").strip()
             or os.getenv("POKE_MODEL", "").strip()
@@ -102,9 +108,18 @@ class HermesAgent:
         if AIAgent is None:  # pragma: no cover
             raise RuntimeError(f"hermes-agent is required to run the embedded framework: {_HERMES_IMPORT_ERROR}")
 
+        provider_config: dict[str, str] | None = None
+        if self.config.framework_base_url or self.config.framework_api_key:
+            provider_config = {}
+            if self.config.framework_base_url:
+                provider_config["base_url"] = self.config.framework_base_url
+            if self.config.framework_api_key:
+                provider_config["api_key"] = self.config.framework_api_key
+
         return AIAgent(
             model=self.config.framework_model,
             provider="openai",
+            provider_config=provider_config,
             api_key=self.config.framework_api_key,
             base_url=self.config.framework_base_url,
             quiet_mode=True,

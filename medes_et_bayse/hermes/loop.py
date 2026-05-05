@@ -42,7 +42,7 @@ class HermesLoopConfig:
     max_events: int = 20
     currency: str = "USD"
     dry_run: bool = True
-    framework_model: str = "llama-3.3-70b-versatile"
+    framework_model: str = "llama-3.1-8b-instant"
     framework_base_url: Optional[str] = None
     framework_api_key: Optional[str] = None
     framework_max_iterations: int = 6
@@ -56,7 +56,7 @@ class HermesLoopConfig:
             os.getenv("GROQ_MODEL", "").strip()
             or os.getenv("HERMES_MODEL", "").strip()
             or os.getenv("POKE_MODEL", "").strip()
-            or "llama-3.3-70b-versatile"
+            or "llama-3.1-8b-instant"
         )
         return cls(
             cycle_interval_seconds=float(os.getenv("HERMES_CYCLE_INTERVAL_SECONDS", "300")),
@@ -108,7 +108,7 @@ class HermesAgent:
             raise RuntimeError("GROQ_API_KEY is required to initialize the Hermes framework agent.")
 
         groq_base_url = (self.config.framework_base_url or "").strip() or "https://api.groq.com/openai/v1"
-        groq_model = (self.config.framework_model or "").strip() or "llama-3.3-70b-versatile"
+        groq_model = (self.config.framework_model or "").strip() or "llama-3.1-8b-instant"
 
         return AIAgent(
             model=groq_model,

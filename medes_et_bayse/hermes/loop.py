@@ -25,6 +25,138 @@ else:
 
 logger = logging.getLogger(__name__)
 
+MAX_CONTEXT_CHARS = 5000
+MAX_HISTORY_LOGS = 4
+MAX_CONTEXT_VALUE_CHARS = 260
+MAX_LIST_ITEMS = 4
+
+
+def _truncate_text(value: Any, limit: int = MAX_CONTEXT_VALUE_CHARS) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _compact_fields(payload: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for field in fields:
+        value = payload.get(field)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, str):
+            compact[field] = _truncate_text(value)
+        elif isinstance(value, list):
+            compact[field] = [
+                _truncate_text(item) if isinstance(item, str) else item
+                for item in value[:MAX_LIST_ITEMS]
+            ]
+        elif isinstance(value, dict):
+            compact[field] = {
+                key: _truncate_text(item) if isinstance(item, str) else item
+                for key, item in list(value.items())[:MAX_LIST_ITEMS]
+                if item not in (None, "", [], {})
+            }
+        else:
+            compact[field] = value
+    return compact
+
+
+def _summarize_memory_value(key: str, value: Any) -> Any:
+    if key == "last_prediction":
+        return _compact_fields(
+            value,
+            (
+                "event_id",
+                "event_title",
+                "market_id",
+                "market_title",
+                "side",
+                "outcome",
+                "price",
+                "confidence",
+                "signal",
+                "currency",
+                "rationale",
+            ),
+        )
+    if key == "last_trade":
+        summary = _compact_fields(
+            value,
+            (
+                "attempted",
+                "dry_run",
+                "status",
+                "message",
+                "notional",
+                "price",
+                "side",
+                "outcome",
+            ),
+        )
+        order = _compact_fields(value.get("order") if isinstance(value, dict) else None, ("event_id", "market_id", "side", "outcome", "amount", "currency", "price"))
+        if order:
+            summary["order"] = order
+        return summary
+    if key == "last_reflection":
+        summary = _compact_fields(value, ("summary", "lessons"))
+        lessons = summary.get("lessons")
+        if isinstance(lessons, list):
+            summary["lessons"] = lessons[:MAX_LIST_ITEMS]
+        return summary
+    if key == "last_framework_response":
+        return _truncate_text(value, limit=MAX_CONTEXT_VALUE_CHARS)
+    if isinstance(value, dict):
+        return _compact_fields(value, tuple(list(value.keys())[:MAX_LIST_ITEMS]))
+    if isinstance(value, list):
+        return [
+            _truncate_text(item) if isinstance(item, str) else item
+            for item in value[:MAX_LIST_ITEMS]
+        ]
+    return _truncate_text(value)
+
+
+def _format_log_entry(entry: Any) -> dict[str, Any]:
+    compact = {
+        "id": getattr(entry, "id", None),
+        "level": getattr(entry, "level", None),
+        "category": getattr(entry, "category", None),
+        "message": _truncate_text(getattr(entry, "message", ""), limit=200),
+    }
+    return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+
+
+def _compact_snapshot_text(snapshot: dict[str, Any]) -> str:
+    lines = [
+        f'run_id={snapshot.get("run_id", "")}',
+        "config=" + json.dumps(snapshot.get("config", {}), ensure_ascii=False, separators=(",", ":")),
+    ]
+
+    memory = snapshot.get("memory", {})
+    for key in ("last_prediction", "last_trade", "last_reflection", "last_framework_response"):
+        value = memory.get(key)
+        if value in (None, "", [], {}):
+            continue
+        lines.append(f'{key}=' + json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+    recent_logs = snapshot.get("recent_logs", [])
+    if recent_logs:
+        lines.append("recent_logs=")
+        for log in recent_logs[:MAX_HISTORY_LOGS]:
+            parts = [
+                f"[{log.get('level', 'info')}]",
+                _truncate_text(log.get('category', ''), limit=40),
+                _truncate_text(log.get('message', ''), limit=160),
+            ]
+            lines.append("- " + " ".join(part for part in parts if part.strip()))
+
+    text = "\n".join(lines).strip()
+    if len(text) > MAX_CONTEXT_CHARS:
+        return text[: MAX_CONTEXT_CHARS - 1].rstrip() + "…"
+    return text
+
 def _first_env(*names: str) -> Optional[str]:
     for name in names:
         value = os.getenv(name, "").strip()
@@ -129,55 +261,47 @@ class HermesAgent:
             return value
 
     def _framework_snapshot(self, run_id: str) -> dict[str, Any]:
+        def latest_memory_value(key: str) -> Any:
+            entries = self.store.recall("hermes", key)[:1]
+            if not entries:
+                return None
+            return self._parse_memory_value(entries[0].value)
+
         return {
             "run_id": run_id,
             "config": asdict(self.config),
             "memory": {
-                "last_prediction": [
-                    self._parse_memory_value(entry.value)
-                    for entry in self.store.recall("hermes", "last_prediction")[:1]
-                ],
-                "last_trade": [
-                    self._parse_memory_value(entry.value)
-                    for entry in self.store.recall("hermes", "last_trade")[:1]
-                ],
-                "last_reflection": [
-                    self._parse_memory_value(entry.value)
-                    for entry in self.store.recall("hermes", "last_reflection")[:1]
-                ],
-                "last_framework_response": [
-                    self._parse_memory_value(entry.value)
-                    for entry in self.store.recall("hermes", "last_framework_response")[:1]
-                ],
+                "last_prediction": self._summarize_memory_value("last_prediction", latest_memory_value("last_prediction")),
+                "last_trade": self._summarize_memory_value("last_trade", latest_memory_value("last_trade")),
+                "last_reflection": self._summarize_memory_value("last_reflection", latest_memory_value("last_reflection")),
+                "last_framework_response": self._summarize_memory_value("last_framework_response", latest_memory_value("last_framework_response")),
             },
             "recent_logs": [
-                {
-                    "id": entry.id,
-                    "level": entry.level,
-                    "category": entry.category,
-                    "message": entry.message,
-                    "created_at": entry.created_at,
-                }
-                for entry in self.store.recent_logs(limit=8)
+                _format_log_entry(entry)
+                for entry in self.store.recent_logs(limit=MAX_HISTORY_LOGS)
             ],
         }
 
-    def _framework_note(self, run_id: str) -> str:
+    def _framework_context_text(self, run_id: str) -> str:
         snapshot = self._framework_snapshot(run_id)
+        return _compact_snapshot_text(snapshot)
+
+    def _framework_note(self, run_id: str) -> str:
+        context_text = self._framework_context_text(run_id)
         result = self.framework.run_conversation(
             user_message=(
                 "Review the current Hermes trading cycle state and return one concise operational note. "
-                "Use the SQLite snapshot as context, do not invent market data, and do not call tools."
+                "Use the runtime snapshot as context, do not invent market data, and do not call tools."
             ),
             system_message=(
                 "You are Hermes Agent embedded inside the medes-et-bayse repository. "
-                "Your job is to produce a short framework note that stays grounded in the provided SQLite snapshot. "
+                "Your job is to produce a short framework note that stays grounded in the provided runtime snapshot. "
                 "Keep the response concise and practical."
             ),
             conversation_history=[
                 {
                     "role": "system",
-                    "content": json.dumps(snapshot, ensure_ascii=False, default=str, indent=2),
+                    "content": context_text,
                 }
             ],
             task_id=run_id,

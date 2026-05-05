@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -90,7 +89,7 @@ def _start_http_server() -> ThreadingHTTPServer:
     return server
 
 
-def build_application(client: BayseClient, store: HermesDatabase) -> Application:
+def build_application(client: BayseClient, store: HermesDatabase, config: HermesLoopConfig) -> Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
@@ -99,6 +98,13 @@ def build_application(client: BayseClient, store: HermesDatabase) -> Application
     application.bot_data["poke_api_key"] = runtime_config.poke_api_key
     application.bot_data["hermes_store"] = store
     application.bot_data["hermes_client"] = client
+    application.bot_data["hermes_loop_config"] = config
+    application.bot_data["hermes_framework"] = {
+        "model": config.framework_model,
+        "base_url": config.framework_base_url,
+        "max_iterations": config.framework_max_iterations,
+        "skip_memory": config.framework_skip_memory,
+    }
 
     async def help_handler(update: Any, context: Any) -> None:
         message = getattr(update, "effective_message", None) or getattr(update, "message", None)
@@ -146,11 +152,12 @@ def main() -> None:
 
     client = build_client(runtime_config)
     store = HermesDatabase()
-    agent = HermesAgent(client, store, HermesLoopConfig.from_env())
+    loop_config = HermesLoopConfig.from_env()
+    agent = HermesAgent(client, store, loop_config)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
-    telegram_stop_event: threading.Event | None = None
-    telegram_thread: threading.Thread | None = None
+    hermes_stop_event: threading.Event | None = None
+    hermes_thread: threading.Thread | None = None
 
     if token:
         result = set_my_commands(token)
@@ -160,21 +167,23 @@ def main() -> None:
                     "startup": "ok",
                     "setMyCommands": result.get("ok", False),
                     "pokeApiKeyConfigured": bool(runtime_config.poke_api_key),
+                    "hermesFrameworkModel": loop_config.framework_model,
+                    "hermesFrameworkBaseUrlConfigured": bool(loop_config.framework_base_url),
                 },
                 ensure_ascii=False,
             ),
             flush=True,
         )
-        application = build_application(client, store)
-        telegram_stop_event, telegram_thread = _start_hermes_agent(agent)
+        application = build_application(client, store, loop_config)
+        hermes_stop_event, hermes_thread = _start_hermes_agent(agent)
         print(json.dumps({"polling": "starting"}, ensure_ascii=False), flush=True)
         try:
             application.run_polling(drop_pending_updates=True)
         finally:
-            if telegram_stop_event is not None:
-                telegram_stop_event.set()
-            if telegram_thread is not None:
-                telegram_thread.join(timeout=5)
+            if hermes_stop_event is not None:
+                hermes_stop_event.set()
+            if hermes_thread is not None:
+                hermes_thread.join(timeout=5)
     else:
         print(
             json.dumps(
@@ -182,6 +191,8 @@ def main() -> None:
                     "startup": "ok",
                     "setMyCommands": False,
                     "pokeApiKeyConfigured": bool(runtime_config.poke_api_key),
+                    "hermesFrameworkModel": loop_config.framework_model,
+                    "hermesFrameworkBaseUrlConfigured": bool(loop_config.framework_base_url),
                     "telegram": "disabled",
                 },
                 ensure_ascii=False,

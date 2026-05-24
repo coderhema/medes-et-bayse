@@ -1,16 +1,33 @@
 <img width="124" height="124" alt="share_1774484367512" src="https://github.com/user-attachments/assets/fe9107ec-5177-4ddc-806d-1a718eb9bfae" />
 
-
 # medes-et-bayse
 
-A quantitative trading bot for [Bayse Markets](https://bayse.markets) — Africa's largest prediction market platform. Uses the Bayse REST API with Poke API as backend orchestration.
+An autonomous trading agent for [Bayse Markets](https://bayse.markets) — Africa's largest prediction market platform. Uses **PyFlue** for agent orchestration with a **Ralph loop** pattern (Goal → Plan → Execute → Reflect → Repeat).
+
+## Architecture
+
+```
+User sends /goal in Telegram
+       │
+       ▼
+  ┌─────────────────┐
+  │   Ralph Loop     │ ← PyFlue agent entry point (bot/agent.py)
+  │  Goal→Plan→     │
+  │  Execute→Reflect │
+  │  →Repeat         │
+  └────────┬────────┘
+           │
+    ┌──────┼──────┐────────┐
+    ▼      ▼      ▼        ▼
+ Tavily  Bayse   Kelly   SQLite
+ Search  Markets Criterion Memory
+ (research) (scan) (signals) (log)
+```
 
 ## Strategies Implemented
 
 - **Kelly Criterion** — Size positions optimally based on edge and bankroll
 - **Arbitrage Detection** — Spot mispriced markets where Yes + No < 1 (implied probability gap)
-- **Market Making** — Provide liquidity by quoting both sides and capturing spread
-- **Bayesian Prior Update** — Update market beliefs dynamically as new information arrives
 
 ## Setup
 
@@ -28,62 +45,82 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `BAYSE_API_KEY` | Your Bayse Markets API key (from app settings) |
-| `BAYSE_BASE_URL` | API base URL (`https://relay.bayse.markets`) |
-| `POKE_API_KEY` | Your Poke API key for backend orchestration |
-| `POKE_WEBHOOK_URL` | Poke webhook endpoint for trade signals |
-| `DRY_RUN` | Set to `true` to simulate trades without real money |
+| `BAYSE_PUBLIC_KEY` | Bayse Markets public key |
+| `BAYSE_SECRET_KEY` | Bayse Markets secret key (HMAC-SHA256) |
+| `TAVILY_API_KEY` | Tavily Search API key (for market research) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
+| `DATABASE_PATH` | SQLite database path (default: `/data/medes.db`) |
+| `DRY_RUN` | Set to `true` to simulate trades (default: `true`) |
 | `BANKROLL` | Total capital allocated to the bot (USDC) |
 | `MAX_POSITION_FRACTION` | Max fraction of bankroll per trade (default: 0.05) |
 | `MIN_EDGE` | Minimum edge threshold before trading (default: 0.03) |
+| `CYCLE_INTERVAL_SECONDS` | Seconds between Ralph loop cycles (default: 300) |
 
-## Running the Bot
+## Running the Agent
 
 ```bash
-# Run the full trading loop
-python bot/main.py
-
-# Run only the market scanner (no trades)
-python bot/main.py --scan-only
-
-# Run a specific strategy
-python bot/main.py --strategy kelly
-python bot/main.py --strategy arbitrage
-python bot/main.py --strategy market-making
+# Start the PyFlue agent with Telegram bot
+python bot/agent.py
 ```
 
-## Architecture
+### Telegram Commands
+
+| Command | Description |
+|---|---|
+| `/goal` | Start the autonomous Ralph loop |
+| `/stop` | Stop the active loop |
+| `/status` | Show agent status, recent trades, and notes |
+| `/trades` | Show recent trade log |
+
+## Ralph Loop Cycle
+
+Each cycle:
+1. **Scan** — Fetch open markets from Bayse API
+2. **Research** — Use Tavily to gather news context for high-signal markets
+3. **Evaluate** — Run Kelly Criterion + Arbitrage strategies
+4. **Execute** — Place trades (or simulate in dry-run mode)
+5. **Log** — Write everything to SQLite (trades, research, reasoning)
+6. **Report** — Push cycle summary to Telegram chat
+
+## SQLite Memory Schema
+
+Three tables at `DATABASE_PATH`:
+
+- **trades** — Every trade with market_id, side, price, amount, edge, strategy, status
+- **market_research** — Tavily research results tied to markets
+- **agent_notes** — Agent reasoning and cycle summaries
+
+## Deployment (Render)
+
+```bash
+# Deploy as a Background Worker on Render
+# render.yaml is pre-configured
+render deploy
+```
+
+Requires a persistent disk mounted at `/data` for SQLite storage.
+
+## Project Structure
 
 ```
 medes-et-bayse/
 ├── bot/
-│   ├── main.py              # Entry point + trading loop
-│   ├── bayse_client.py      # Bayse Markets REST API client
-│   ├── poke_client.py       # Poke API client (backend orchestration)
+│   ├── agent.py          # PyFlue agent + Ralph loop + Telegram commands
+│   ├── bayse_client.py   # Bayse Markets REST API client
+│   ├── main.py           # Legacy entry point (strategies + polling)
+│   ├── realtime_feed.py  # WebSocket/REST quote feed
 │   ├── strategies/
-│   │   ├── kelly.py         # Kelly Criterion position sizing
-│   │   ├── arbitrage.py     # Arbitrage detection & execution
-│   │   └── market_maker.py  # Market-making spread strategy
-│   └── utils/
-│       ├── bayesian.py      # Bayesian belief updating
-│       └── risk.py          # Risk management helpers
-├── tests/
-│   └── test_strategies.py
-├── .env.example
+│   │   ├── arbitrage.py  # Arbitrage detection
+│   │   └── kelly.py      # Kelly Criterion sizing
+│   ├── telegram_handler.py
+│   └── tools/
+│       ├── bayse.py      # Bayse API tool for PyFlue
+│       ├── memory.py     # SQLite memory tool for PyFlue
+│       └── search.py     # Tavily web search tool for PyFlue
+├── medes_et_bayse/       # Package (client, auth, config, hermes loop)
+├── PROMPT.md             # Agent goal definition
+├── fix_plan.md           # Migration & cycle task plan
+├── render.yaml           # Render deployment config
 ├── requirements.txt
-└── README.md
+└── .env.example
 ```
-
-## Poke Recipe Integration
-
-This bot is designed to be triggered via Poke. The suggested Poke Recipe:
-
-1. **Trigger**: Cron every 5 minutes (or Poke email automation)
-2. **Action**: Call `POST /run-cycle` on the bot's webhook
-3. **Output**: Poke notifies you of any trades executed or opportunities found
-
-See `bot/poke_client.py` for the full webhook interface.
-
-## Disclaimer
-
-This bot is for educational purposes. Prediction markets carry financial risk. Only trade with funds you can afford to lose.

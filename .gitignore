@@ -25,6 +25,7 @@ env/
 *.json
 data/
 logs/
+*.db
 
 # OS
 .DS_Store

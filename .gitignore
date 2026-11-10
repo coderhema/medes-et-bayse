@@ -23,7 +23,13 @@ env/
 # Data
 *.csv
 *.json
-data/
+data/*
+!data/resolved_markets.json.gz
+!medes_et_bayse/slm/artifacts/*.json
+!harness/output/*.json
+*.db-wal
+*.db-shm
+*.tmp
 logs/
 *.db
 

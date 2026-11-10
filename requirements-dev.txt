@@ -1,0 +1,3 @@
+-r requirements.txt
+scikit-learn>=1.4       # SLM training only
+pytest>=8.0

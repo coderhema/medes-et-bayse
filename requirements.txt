@@ -1,12 +1,6 @@
-requests>=2.31.0
-python-dotenv>=1.0.0
-loguru>=0.7.2
+# Runtime (agent + Telegram bot)
 numpy>=1.26.0
-scipy>=1.12.0
-pydantic>=2.5.0
-httpx>=0.27.0
+python-dotenv>=1.0.0
 python-telegram-bot>=21.0
-websockets>=12.0
-pyflue>=0.1.4
-tavily-python>=0.5.0
-aiosqlite>=0.20.0
+model2vec>=0.4.0        # optional text encoder for the SLM (falls back to the text-free head if absent)
+tavily-python>=0.5.0    # optional research step (only used when TAVILY_API_KEY is set)

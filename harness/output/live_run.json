@@ -1,0 +1,115 @@
+{
+ "slm_version": "bayse-slm-v1",
+ "slm_uses_text": false,
+ "config": {
+  "dry_run": true,
+  "bankroll": 100.0,
+  "currency": "USD",
+  "min_edge": 0.08,
+  "kelly_multiplier": 0.25,
+  "max_position_fraction": 0.05,
+  "max_daily_loss_fraction": 0.1,
+  "max_open_positions": 10,
+  "max_trades_per_cycle": 3,
+  "min_orders": 10,
+  "min_liquidity": 0.0,
+  "min_hours_to_close": 6.0,
+  "max_days_to_close": 7.0,
+  "scan_pages": 3,
+  "scan_categories": [
+   "politics",
+   "sports",
+   "entertainment",
+   "economy",
+   "culture"
+  ],
+  "page_size": 20,
+  "cycle_interval_seconds": 300,
+  "database_path": "data/medes.db",
+  "research_top_n": 3,
+  "llm_blend_weight": 0.25
+ },
+ "scanned": 965,
+ "tradeable": 4,
+ "skipped": {
+  "closes_too_far": 39,
+  "low_activity": 860,
+  "no_closing_date": 60,
+  "closes_too_soon": 1,
+  "not_open": 1
+ },
+ "shortlisted": 3,
+ "top_candidates": [
+  {
+   "title": "CZE vs ESP: Who Will Win? \u2014 ESP",
+   "yes_price": 0.8248,
+   "p_slm": 0.8194,
+   "best_net_edge": 0.0011
+  },
+  {
+   "title": "ENG vs CRO: Who Will Win? \u2014 ENG",
+   "yes_price": 0.7848,
+   "p_slm": 0.7795,
+   "best_net_edge": 0.0002
+  },
+  {
+   "title": "ITA vs FRA: Who Will Win? \u2014 FRA",
+   "yes_price": 0.565,
+   "p_slm": 0.5644,
+   "best_net_edge": -1.0
+  },
+  {
+   "title": "TUR vs BEL: Who Will Win? \u2014 BEL",
+   "yes_price": 0.535,
+   "p_slm": 0.5296,
+   "best_net_edge": -1.0
+  }
+ ],
+ "trades": [],
+ "errors": [],
+ "largest_model_vs_market_gaps": [
+  {
+   "title": "TUR vs BEL: Who Will Win? \u2014 BEL",
+   "category": "sports",
+   "yes_price": 0.535,
+   "p_slm": 0.5296,
+   "p_yes": 0.5296,
+   "hours_to_close": 50.226985401111115,
+   "decision": "skip",
+   "reason": "not_shortlisted"
+  },
+  {
+   "title": "CZE vs ESP: Who Will Win? \u2014 ESP",
+   "category": "sports",
+   "yes_price": 0.8248,
+   "p_slm": 0.8194,
+   "p_yes": 0.8194,
+   "hours_to_close": 52.976985401111115,
+   "decision": "skip",
+   "reason": "edge_below_min"
+  },
+  {
+   "title": "ENG vs CRO: Who Will Win? \u2014 ENG",
+   "category": "sports",
+   "yes_price": 0.7848,
+   "p_slm": 0.7795,
+   "p_yes": 0.7795,
+   "hours_to_close": 52.976985401111115,
+   "decision": "skip",
+   "reason": "edge_below_min"
+  },
+  {
+   "title": "ITA vs FRA: Who Will Win? \u2014 FRA",
+   "category": "sports",
+   "yes_price": 0.565,
+   "p_slm": 0.5644,
+   "p_yes": 0.5644,
+   "hours_to_close": 52.976985401111115,
+   "decision": "skip",
+   "reason": "edge_below_min"
+  }
+ ],
+ "telegram_report_captured": [
+  "<b>Cycle #1</b> (DRY RUN)\nMarkets scanned: 965 | tradeable: 4 | shortlisted: 3\nNo market cleared the post-fee edge filter."
+ ]
+}

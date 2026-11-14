@@ -101,7 +101,9 @@ class BayseClient:
         request_url = f"{self.base_url.rstrip('/')}{request_path}"
 
         if auth == "read":
-            headers[self.api_key_header] = self.api_key
+            # Market data is public; only send the key when one is configured.
+            if self.api_key:
+                headers[self.api_key_header] = self.api_key
         elif auth == "private":
             logger.debug("Bayse authenticated request method=%s url=%s auth=%s", method.upper(), request_url, auth)
             headers.update(self._auth.sign(method=method, path=request_path, body=body_for_signing))
@@ -262,25 +264,51 @@ class BayseClient:
         event_id: str,
         market_id: str,
         *,
-        outcome: str,
-        side: str,
+        outcome_id: str,
+        side: str = "BUY",
         amount: float,
-        currency: str,
+        currency: str = "USD",
+        order_type: Optional[str] = None,
         price: Optional[float] = None,
+        max_slippage: Optional[float] = None,
     ) -> Dict[str, Any]:
+        """Place an order (docs: POST /v1/pm/events/{eventId}/markets/{marketId}/orders).
+
+        Body follows the documented schema: side, outcomeId (UUID), amount, type, currency,
+        plus price for LIMIT orders.
+        """
+        if not outcome_id:
+            raise BayseClientError("outcome_id (outcome UUID) is required to place an order")
+        kind = (order_type or ("LIMIT" if price is not None else "MARKET")).upper()
+        if kind not in {"LIMIT", "MARKET"}:
+            raise BayseClientError(f"Unsupported order type: {order_type}")
         body: Dict[str, Any] = {
-            "outcome": outcome.upper(),
             "side": side.upper(),
-            "amount": amount,
-            "currency": currency,
+            "outcomeId": outcome_id,
+            "amount": round(float(amount), 2),
+            "type": kind,
+            "currency": currency.upper(),
         }
-        if price is not None:
-            body["price"] = price
+        if kind == "LIMIT":
+            if price is None:
+                raise BayseClientError("price is required for LIMIT orders")
+            body["price"] = round(float(price), 4)
+        if max_slippage is not None and kind == "MARKET":
+            body["maxSlippage"] = float(max_slippage)
         return self._request(
             "POST",
             f"/pm/events/{event_id}/markets/{market_id}/orders",
             json_body=body,
             auth="write",
+        )
+
+    def get_price_history(self, event_id: str, *, time_period: str = "1Y", outcome: str = "YES") -> Dict[str, Any]:
+        """Public price history for every market in an event (no auth required)."""
+        return self._request(
+            "GET",
+            f"/pm/events/{event_id}/price-history",
+            params={"timePeriod": time_period, "outcome": outcome},
+            auth="none",
         )
 
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
